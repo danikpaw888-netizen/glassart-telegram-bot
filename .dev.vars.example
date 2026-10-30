@@ -1,0 +1,2 @@
+SETUP_KEY=replace_with_random_64_hex_characters
+WEBHOOK_SECRET=replace_with_a_different_random_64_hex_value

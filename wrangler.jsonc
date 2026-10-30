@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "glassart-telegram",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-26",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "durable_objects": {"bindings": [{"name": "REGISTERS", "class_name": "GlassArtRegister"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["GlassArtRegister"]}],
+  "observability": {"enabled": true, "logs": {"enabled": true, "invocation_logs": false}, "traces": {"enabled": false}}
+}
