@@ -136,7 +136,7 @@ test('card resembles requested layout and has clean exact area formatting',()=>{
  const f=fixture(),d={customer:'Клиент',film:'Коричневый',lines:[{width:'1000',height:'1300',count:3,processing:false,thickness:'4'}],comment:''};const text=f.engine.card(d,'📋 Ваш расчёт:');assert.match(text,/🧊 Толщина стекла: 4 мм/);assert.match(text,/📦 Плёнка: Коричневый/);assert.match(text,/Обработка края: Без обработки/);assert.match(text,/1000x1300 мм — 3 шт, площадь 3.9 м²/);assert.match(text,/✅ Стёкол: 3/);assert.match(text,/📐 Площадь: 3.9 м²/);assert.equal(areaDisplay([{width:'1234',height:'567',count:1}]),'0.6997');
 });
 test('daily total counts only completed area within Kazakhstan midnight boundaries',()=>{
- const f=fixture();for(let i=0;i<4;i++)f.fill();const times=['2026-10-25T18:59:59.000Z','2026-10-25T19:00:00.000Z','2026-10-26T18:59:59.000Z','2026-10-26T19:00:00.000Z'];for(let i=0;i<4;i++)f.engine.q('UPDATE orders SET created=?,status=? WHERE id=?',times[i],i===1?3:0,i+1);const report=f.engine.dayReport('26.10.2026');assert.match(report,/Заявок: 2/);assert.match(report,/Общая площадь: 4 м²/);assert.match(report,/Выполнено: 1 заявок · 4 м²/);assert.match(report,/Не выполнено: 1 заявок · 4 м²/);assert.match(f.engine.dayReport('01.01.2000'),/Общая площадь: 0 м²/);assert.throws(()=>f.engine.dayReport('31.02.2026'),InputError);
+ const f=fixture();for(let i=0;i<4;i++)f.fill();const times=['2026-10-25T18:59:59.000Z','2026-10-25T19:00:00.000Z','2026-10-26T18:59:59.000Z','2026-10-26T19:00:00.000Z'];for(let i=0;i<4;i++)f.engine.q('UPDATE orders SET created=?,status=? WHERE id=?',times[i],i===1?3:0,i+1);f.engine.setConfig('report_periods_initialized',false);const report=f.engine.dayReport('26.10.2026');assert.match(report,/Заявок: 2/);assert.match(report,/Общая площадь: 4 м²/);assert.match(report,/Выполнено: 1 заявок · 4 м²/);assert.match(report,/Не выполнено: 1 заявок · 4 м²/);assert.match(f.engine.dayReport('01.01.2000'),/Общая площадь: 0 м²/);assert.throws(()=>f.engine.dayReport('31.02.2026'),InputError);
  f.engine.bindGroup({id:-1001,title:'Цех'});f.send('/day 26.10.2026',{group:true,uid:500,access:{groupMember:true}});assert.match(f.messages().at(-1).text,/Общая площадь: 4 м²/);
 });
 test('multiline positions use one common treatment and thickness for the whole order',()=>{
@@ -175,7 +175,7 @@ test('private day validates dates, respects staff access and explains missing gr
 
 test('a pending repost is skipped if status changes before publication and unmarked orders never repost',()=>{
  const f=fixture();f.engine.bindGroup({id:-1001,title:'Цех'});f.fill();f.fill();const cards=f.deliver().filter(x=>x.rich_message),card=cards.find(x=>x.text.includes('GA-000002'));f.send(null,{group:true,uid:500,messageId:card.message_id,callback:'g:2:1:0',access:{groupMember:true}});f.deliver();f.send('/day');assert.equal(f.engine.q('SELECT * FROM report_reposts').length,1);f.send(null,{group:true,uid:500,messageId:card.message_id,callback:'g:2:2:3',access:{groupMember:true}});assert.equal(f.deliver().filter(x=>x.method==='sendRichMessage'&&x._status_banner!=='day').length,0);f.send('/day');assert.equal(f.engine.q('SELECT * FROM group_reposts').length,0);
- const report=f.engine.dayReport();assert.match(report,/Общая площадь: 4 м² \(только выполненные\)/);assert.match(report,/Не выполнено: 1 заявок · 4 м²/);f.engine.q('UPDATE orders SET status=0 WHERE id=2');assert.match(f.engine.dayReport(),/Общая площадь: 0 м²/);
+ const report=f.engine.dayReport();assert.match(report,/Общая площадь: 0 м²/);assert.match(report,/Заявок: 0/);f.engine.q('UPDATE orders SET status=0 WHERE id=2');assert.match(f.engine.dayReport(),/Общая площадь: 0 м²/);
 });
 
 test('perimeters use real dimensions exactly, include quantity and ignore minimum billable area',()=>{
@@ -200,4 +200,72 @@ test('an order deleted during an in-flight delivery is cleaned up instead of rea
 
 test('daily reports contain the day banner and full totals in one rich message in both chats',()=>{
  const f=fixture();f.engine.bindGroup({id:-1001,title:'Цех'});f.fill();f.deliver();f.send('/day');const rows=f.engine.q("SELECT params FROM outbox WHERE method='sendRichMessage'").map(x=>JSON.parse(x.params));assert.deepEqual(rows.map(x=>x.chat_id),[-1001,100]);for(const r of rows){assert.equal(r._status_banner,'day');assert.match(r.rich_message.html,/tg:\/\/photo\?id=day/);assert.match(r.rich_message.html,/Итоги за/);assert.match(r.rich_message.html,/только выполненные/);assert.equal(r.rich_message.media[0].media.media,'attach://banner');assert.equal(r.text,undefined);}f.deliver();f.send('/day 26.10.2026',{group:true,uid:500,access:{groupMember:true}});const group=f.engine.one("SELECT params FROM outbox WHERE method='sendRichMessage'");assert.equal(JSON.parse(group.params)._status_banner,'day');assert.equal(JSON.parse(group.params).chat_id,-1001);
+});
+
+
+test('closing three orders puts a later same-day order exclusively in the next report',()=>{
+ const f=fixture();for(let i=0;i<3;i++)f.fill();f.engine.q('UPDATE orders SET status=3');
+ f.send('/day');const first=f.engine.one('SELECT * FROM day_reports WHERE legacy=0');
+ assert.match(f.messages().at(-1).text,/Заявок: 3/);assert.match(f.messages().at(-1).text,/Общая площадь: 12 м²/);
+ f.fill();assert.equal(f.engine.get(4).created.slice(0,10),f.engine.get(3).created.slice(0,10));
+ assert.deepEqual(f.engine.openReportOrders().map(o=>o.id),[4]);
+ f.engine.q('UPDATE orders SET status=3 WHERE id=4');f.send('/day');
+ const reports=f.engine.q('SELECT * FROM day_reports WHERE legacy=0 ORDER BY id');assert.equal(reports.length,2);
+ assert.equal(Date.parse(reports[1].day)-Date.parse(first.day),86400000);
+ assert.match(f.messages().at(-1).text,/Заявок: 1/);assert.match(f.messages().at(-1).text,/Общая площадь: 4 м²/);
+ assert.deepEqual(f.engine.q('SELECT order_id,report_id FROM report_orders ORDER BY order_id').map(o=>o.report_id),[first.id,first.id,first.id,reports[1].id]);
+ f.send('/day');assert.equal(f.engine.q('SELECT * FROM day_reports WHERE legacy=0').length,2);
+ f.send('/day '+first.day.split('-').reverse().join('.'));assert.match(f.messages().at(-1).text,/Заявок: 3/);
+});
+
+test('open periods cross midnight and persist across engine restart; snapshots do not drift',()=>{
+ const f=fixture();f.fill();f.send('/day');const first=f.engine.one('SELECT * FROM day_reports WHERE legacy=0');
+ f.fill();f.engine.q("UPDATE orders SET created='2026-01-01T00:00:00.000Z' WHERE id=2");
+ const e=new Engine(f.engine.sql);assert.deepEqual(e.openReportOrders().map(o=>o.id),[2]);
+ e.q('UPDATE orders SET status=3');assert.match(e.savedReport(first),/Выполнено: 0 заявок/);
+ assert.match(f.transaction(()=>e.closeDayReport()),/Выполнено: 1 заявок/);
+ assert.equal(e.q('SELECT * FROM report_orders').length,2);
+});
+
+test('invalid dates and archive reads never close the open period; failed transactions roll back closure',()=>{
+ const f=fixture();f.fill();f.send('/day 31.02.2026');f.send('/day 01.01.2000');
+ assert.equal(f.engine.q('SELECT * FROM day_reports').length,0);assert.equal(f.engine.openReportOrders().length,1);
+ assert.throws(()=>f.transaction(()=>{f.engine.closeDayReport();throw new Error('rollback');}));
+ assert.equal(f.engine.q('SELECT * FROM report_orders').length,0);assert.equal(f.engine.q('SELECT * FROM day_reports').length,0);
+});
+
+test('private and group reports share one boundary; delayed delivery cannot consume later orders',()=>{
+ const f=fixture();f.engine.bindGroup({id:-1001,title:'Цех'});f.fill();f.send('/day');f.fill();
+ const first=f.engine.one('SELECT * FROM day_reports WHERE legacy=0');f.deliver();
+ assert.deepEqual(f.engine.openReportOrders().map(o=>o.id),[2]);
+ f.send('/day',{group:true,uid:500,access:{groupMember:true}});
+ assert.match(f.messages().at(-1).text,/Заявок: 1/);assert.equal(f.engine.q('SELECT * FROM day_reports WHERE legacy=0').length,2);
+ assert.match(f.engine.savedReport(first),/Заявок: 1/);
+});
+
+test('initial migration archives prior dates once and leaves today open',()=>{
+ const f=fixture();f.fill();f.fill();f.engine.q("UPDATE orders SET created='2026-01-01T00:00:00.000Z' WHERE id=1");f.engine.setConfig('report_periods_initialized',false);
+ const e=new Engine(f.engine.sql);assert.deepEqual(e.openReportOrders().map(o=>o.id),[2]);
+ assert.match(e.dayReport('01.01.2026'),/Заявок: 1/);assert.match(e.dayReport('01.01.2026'),/Архив до перехода/);
+ assert.equal(new Engine(e.sql).q('SELECT * FROM day_reports').length,1);
+});
+
+
+test('19:00 closure assigns 19:05 order to tomorrow and midnight does not drop it',(t)=>{
+ t.mock.timers.enable({apis:['Date'],now:new Date('2026-11-12T13:50:00Z')});
+ const f=fixture();for(let i=0;i<3;i++)f.fill();
+ t.mock.timers.setTime(new Date('2026-11-12T14:00:00Z').getTime());f.send('/day');
+ assert.match(f.messages().at(-1).text,/Итоги за 12.11.2026/);assert.match(f.messages().at(-1).text,/Заявок: 3/);
+ t.mock.timers.setTime(new Date('2026-11-12T14:05:00Z').getTime());f.fill();
+ assert.match(f.engine.dayReport(),/Итоги за 13.11.2026/);assert.match(f.engine.dayReport(),/Заявок: 1/);
+ t.mock.timers.setTime(new Date('2026-11-13T14:00:00Z').getTime());
+ const restarted=new Engine(f.engine.sql);assert.match(f.transaction(()=>restarted.closeDayReport()),/Заявок: 1/);
+ assert.deepEqual(restarted.q('SELECT order_id,report_id FROM report_orders ORDER BY order_id').map(o=>o.report_id),[1,1,1,2]);
+});
+
+test('deleting a closed order excludes it from archive without moving other orders',()=>{
+ const f=fixture();f.fill();f.send('/day');const first=f.engine.one('SELECT * FROM day_reports');f.fill();
+ f.send('/delete 1');const button=f.messages().at(-1).reply_markup.inline_keyboard[0][0].callback_data;
+ f.send(null,{callback:button});assert.match(f.engine.savedReport(first),/Заявок: 0/);
+ assert.deepEqual(f.engine.openReportOrders().map(o=>o.id),[2]);assert.equal(f.engine.q('SELECT * FROM report_orders WHERE order_id=1').length,0);
 });

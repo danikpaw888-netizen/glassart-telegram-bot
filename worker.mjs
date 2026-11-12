@@ -6,7 +6,7 @@ import { STATUS_BANNERS } from './banners.mjs';
 
 const MAX_BODY=131072;
 const encoder=new TextEncoder();
-const COMMANDS=[['day','Итоги дня и повтор невыполненных заявок'],['delete','Удалить заявку по номеру (администратор)'],['menu','Главное меню'],['new','Отправить новую заявку'],['resume','Продолжить черновик'],['cancel','Отменить ввод'],['id','Мой Telegram ID'],['group','Группа сотрудников'],['admins','Администраторы']].map(([command,description])=>({command,description}));
+const COMMANDS=[['day','Завершить период и отправить отчёт'],['delete','Удалить заявку по номеру (администратор)'],['menu','Главное меню'],['new','Отправить новую заявку'],['resume','Продолжить черновик'],['cancel','Отменить ввод'],['id','Мой Telegram ID'],['group','Группа сотрудников'],['admins','Администраторы']].map(([command,description])=>({command,description}));
 export function safeEqual(a,b){if(typeof a!=='string'||typeof b!=='string')return false;const x=encoder.encode(a),y=encoder.encode(b);return x.length===y.length&&x.length>0&&timingSafeEqual(x,y);}
 export class ApiError extends Error{constructor(code,retry=0,description=''){super('Telegram API error');this.code=code;this.retry=retry;this.notModified=/message is not modified/i.test(description);this.messageMissing=/message to edit not found/i.test(description);this.deleteMissing=/message to delete not found/i.test(description);}}
 export async function boundedJSON(request,max=MAX_BODY){
@@ -31,11 +31,11 @@ const json=(data,status=200)=>Response.json(data,{status,headers:{'Cache-Control
 // One coordination object per company register. Sessions and orders are SQL rows,
 // not one large JSON value. Telegram updates and outbox writes commit atomically.
 export class GlassArtRegister extends DurableObject {
- constructor(ctx,env){super(ctx,env);this.engine=new Engine(ctx.storage.sql);this.flushing=null;this.installing=null;if(this.engine.config('token')&&this.engine.config('commands_version')!==7){ctx.storage.transactionSync(()=>{this.engine.enqueue('setMyCommands',{commands:COMMANDS});this.engine.setConfig('commands_version',7);});ctx.waitUntil(this.ensureAlarm());}if(this.engine.config('group')&&this.engine.config('card_style')!==7){ctx.storage.transactionSync(()=>{this.engine.migrateBanners();this.engine.setConfig('card_style',7);});ctx.waitUntil(this.ensureAlarm());}}
+ constructor(ctx,env){super(ctx,env);this.engine=ctx.storage.transactionSync(()=>new Engine(ctx.storage.sql));this.flushing=null;this.installing=null;if(this.engine.config('token')&&this.engine.config('commands_version')!==8){ctx.storage.transactionSync(()=>{this.engine.enqueue('setMyCommands',{commands:COMMANDS});this.engine.setConfig('commands_version',8);});ctx.waitUntil(this.ensureAlarm());}if(this.engine.config('group')&&this.engine.config('card_style')!==7){ctx.storage.transactionSync(()=>{this.engine.migrateBanners();this.engine.setConfig('card_style',7);});ctx.waitUntil(this.ensureAlarm());}}
  async ensureAlarm(){if(await this.ctx.storage.getAlarm()===null)await this.ctx.storage.setAlarm(Date.now()+1000);}
  async state(){
   const e=this.engine,username=e.config('username'),claim=e.config('claim'),ready=e.config('ready');
-  return {version:'3.6.2',configured:!!e.config('token'),active:!!e.config('owner'),username:username||null,group:e.config('group'),
+  return {version:'3.7.0',configured:!!e.config('token'),active:!!e.config('owner'),username:username||null,group:e.config('group'),
    delivery:{queued:e.one('SELECT COUNT(*) AS n FROM outbox WHERE failed=0').n,failed:e.one('SELECT COUNT(*) AS n FROM outbox WHERE failed=1').n,refreshing:e.one('SELECT COUNT(*) AS n FROM group_jobs').n,legacy_stickers:e.one('SELECT COUNT(*) AS n FROM status_reactions').n},
    claim_url:ready&&claim?`https://t.me/${username}?start=claim_${claim}`:null};
  }
@@ -56,7 +56,7 @@ export class GlassArtRegister extends DurableObject {
    await telegram(token,'setWebhook',{url,secret_token:this.env.WEBHOOK_SECRET,max_connections:1,allowed_updates:['message','callback_query'],drop_pending_updates:false});
    const info=await telegram(token,'getWebhookInfo');if(info.url!==url)throw new ApiError(0);
    e.setConfig('ready',true);
-   await telegram(token,'setMyCommands',{commands:COMMANDS});e.setConfig('commands_version',7);
+   await telegram(token,'setMyCommands',{commands:COMMANDS});e.setConfig('commands_version',8);
    return this.state();
   }catch(error){if(!(error instanceof ApiError))throw error;return {error:error.code===401?'Telegram не принял токен. Проверьте его в BotFather.':`Telegram временно недоступен (код ${error.code}). Повторите подключение тем же токеном.`,status:502};}
  }
@@ -129,7 +129,7 @@ export default {
  async fetch(request,env){
   const url=new URL(request.url),path=url.pathname;
   try{
-   if(request.method==='GET'&&path==='/health')return json({service:'GlassArt Telegram Bot',status:'ok',version:'3.6.2'});
+   if(request.method==='GET'&&path==='/health')return json({service:'GlassArt Telegram Bot',status:'ok',version:'3.7.0'});
    if(request.method==='GET'&&(path==='/'||path==='/setup')){
     const nonce=crypto.randomUUID().replaceAll('-','');
     return new Response(setupPage(nonce),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Content-Security-Policy':`default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`}});

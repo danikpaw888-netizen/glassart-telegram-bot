@@ -4,7 +4,7 @@
     "wrangler": "^4.152.0"
   },
   "name": "glassart-telegram",
-  "version": "3.6.2",
+  "version": "3.7.0",
   "private": true,
   "type": "module",
   "description": "GlassArt Telegram order register on Cloudflare Workers",

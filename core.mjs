@@ -13,6 +13,9 @@ const PROMPTS = {
   comment:'Комментарий (до 500 символов) или «Пропустить».'
 };
 export const SCHEMA = [
+ 'CREATE TABLE IF NOT EXISTS day_reports(id INTEGER PRIMARY KEY AUTOINCREMENT,day TEXT NOT NULL,closed TEXT NOT NULL,legacy INTEGER NOT NULL DEFAULT 0)',
+ 'CREATE TABLE IF NOT EXISTS report_orders(order_id INTEGER PRIMARY KEY,report_id INTEGER NOT NULL,data TEXT NOT NULL,status INTEGER NOT NULL)',
+ 'CREATE INDEX IF NOT EXISTS report_orders_report ON report_orders(report_id)',
  'CREATE TABLE IF NOT EXISTS deletion_requests(token TEXT PRIMARY KEY,order_id INTEGER NOT NULL,version INTEGER NOT NULL,actor INTEGER NOT NULL,chat_id INTEGER NOT NULL,expires INTEGER NOT NULL)',
  'CREATE TABLE IF NOT EXISTS deleted_orders(order_id INTEGER PRIMARY KEY,actor INTEGER NOT NULL,name TEXT NOT NULL,at TEXT NOT NULL)',
  'CREATE TABLE IF NOT EXISTS removal_outbox(outbox_id INTEGER PRIMARY KEY,order_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL)',
@@ -67,7 +70,7 @@ export function parseThickness(text) {
  return String(value);
 }
 export class Engine {
- constructor(sql){this.sql=sql;for(const statement of SCHEMA) this.q(statement);this.ensureAdmins();}
+ constructor(sql){this.sql=sql;for(const statement of SCHEMA) this.q(statement);this.ensureAdmins();this.ensureReports();}
  q(query,...args){return this.sql.exec(query,...args).toArray();}
  one(query,...args){return this.q(query,...args)[0];}
  config(key){const row=this.one('SELECT value FROM config WHERE key=?',key);return row?JSON.parse(row.value):null;}
@@ -97,7 +100,7 @@ export class Engine {
   for(const line of text.split('\n')){if(part.length+line.length>3400){chunks.push(part);part='';}part+=line+'\n';}chunks.push(part);
   chunks.forEach((text,index)=>{const params={chat_id:uid,text:text.trim()||'—'};if(rows&&index===chunks.length-1)params.reply_markup={inline_keyboard:rows.map(row=>row.map(([text,callback_data])=>({text,callback_data})))};this.enqueue('sendMessage',params);});
  }
- menu(uid){const rows=[[['＋ Новая заявка','new']],[['📝 Продолжить черновик','resume']]];if(this.isAdmin(uid))rows.push([['👥 Администраторы','manage_admins']],[['🗑 Удалить заявку','delete_help']],[['Группа сотрудников','group_help']]);this.send(uid,'GlassArt · Отправка заявок\nЗаполните заявку здесь. Все заявки и кнопки выполнения находятся в группе сотрудников.\nЧерновик сохраняется автоматически. /cancel — отменить ввод.\n/day — площадь заявок за день; заявки со статусом «Не выполнено» повторяются в группе сотрудников.',rows);}
+ menu(uid){const rows=[[['＋ Новая заявка','new']],[['📝 Продолжить черновик','resume']]];if(this.isAdmin(uid))rows.push([['👥 Администраторы','manage_admins']],[['🗑 Удалить заявку','delete_help']],[['Группа сотрудников','group_help']]);this.send(uid,'GlassArt · Отправка заявок\nЗаполните заявку здесь. Все заявки и кнопки выполнения находятся в группе сотрудников.\nЧерновик сохраняется автоматически. /cancel — отменить ввод.\n/day — завершить период и сохранить отчёт; /day ДД.ММ.ГГГГ — посмотреть закрытый отчёт. Новые заявки попадут в следующий отчёт; заявки со статусом «Не выполнено» повторяются в группе сотрудников.',rows);}
  groupHelp(uid){if(!this.isAdmin(uid))return;const g=this.config('group');this.send(uid,(g?`Группа: ${g.title}\n`:'Группа сотрудников пока не подключена.\n')+'Добавьте @'+(this.config('username')||'GlassArtWork_bot')+' в нужную группу и назначьте администратором. Затем от своего аккаунта отправьте в группе /bindgroup. Вы должны быть администратором этого бота и участником группы. Сохраненные заявки тоже поступят туда.');}
  adminPanel(uid){if(!this.isAdmin(uid))return this.send(uid,'Управление администраторами доступно только администраторам.');this.send(uid,`Администраторы GlassArt:\n${this.adminIds().map(id=>'• ID '+id).join('\n')}\n\nДля назначения нужен числовой Telegram ID. Будущий администратор может получить его командой /id у этого бота.`,[[['＋ Добавить администратора','admin_add']],[['Снять права администратора','admin_remove']],[['Главное меню','menu']]]);}
  drows(s,rows){return rows.map(row=>row.map(([label,action])=>[label,`d:${s.token}:${s.rev}:${action}`]));}
@@ -129,12 +132,61 @@ export class Engine {
  bindGroup(chat,threadId){const old=this.config('group'),g={id:chat.id,title:chat.title||'Группа сотрудников',thread_id:threadId||null};if(old?.id===g.id&&old.thread_id!==g.thread_id){this.q('DELETE FROM group_cards WHERE chat_id=?',g.id);this.q('DELETE FROM group_copies WHERE chat_id=?',g.id);}this.q('DELETE FROM outbox_meta WHERE outbox_id IN (SELECT id FROM outbox WHERE recipient<0)');this.q('DELETE FROM outbox WHERE recipient<0');this.pruneDeliveryMetadata();this.setConfig('group',g);this.q('DELETE FROM group_jobs');this.q('DELETE FROM group_reposts');this.q('INSERT INTO group_jobs SELECT id,?,? FROM orders',g.id,g.thread_id);this.send(g.id,'✅ Группа подключена к GlassArt. Заявки будут появляться здесь с кнопками «Выполнено» и «Не выполнено». Сохраненные заявки добавлены в очередь отправки.');}
  groupText(o){const event=this.one("SELECT e.actor,u.name FROM events e LEFT JOIN user_names u ON u.id=e.actor WHERE e.order_id=? AND e.action LIKE 'Статус:%' ORDER BY e.id DESC LIMIT 1",o.id);return this.card(o.data,`📋 Заявка ${code(o.id)}`)+`\n👤 Отправил: ${o.author}\n🕒 ${new Date(o.created).toLocaleString('ru-RU',{timeZone:'Asia/Oral'})}\n\nСтатус: ${completionText(o.status)}`+(event?`\nОтметил: ${event.name||'Сотрудник'}`:'');}
  completionButtons(o){const decided=this.one("SELECT id FROM events WHERE order_id=? AND action LIKE 'Статус:%' LIMIT 1",o.id);return (decided||[2,3].includes(o.status))?[[[o.status===3||o.status===2?'✅ Заказ выполнен':'❌ Заказ не выполнен',`r:${o.id}:${o.version}`]]]:[[['✅ Выполнено',`g:${o.id}:${o.version}:3`],['❌ Не выполнено',`g:${o.id}:${o.version}:0`]]];}
- dayReport(argument=''){let day=localDay(Date.now());if(argument){const m=/^(\d{2})\.(\d{2})\.(\d{4})$/.exec(argument);if(!m)throw new InputError('Формат: /day или /day ДД.ММ.ГГГГ');const date=new Date(Date.UTC(+m[3],+m[2]-1,+m[1]));if(date.getUTCFullYear()!==+m[3]||date.getUTCMonth()!==+m[2]-1||date.getUTCDate()!==+m[1])throw new InputError('Укажите существующую дату.');day=`${m[3]}-${m[2]}-${m[1]}`;}const date=new Date(day+'T00:00:00Z'),rows=this.q('SELECT data,status,created FROM orders WHERE created>=? AND created<?',new Date(+date-86400000).toISOString(),new Date(+date+86400000).toISOString()).filter(o=>localDay(o.created)===day),done=rows.filter(o=>[2,3].includes(o.status)),pending=rows.filter(o=>![2,3].includes(o.status)),lines=list=>list.flatMap(o=>JSON.parse(o.data).lines||[]);return `📊 Итоги за ${day.split('-').reverse().join('.')}\nПо дате отправки заявки · время Казахстана\n\n📋 Заявок: ${rows.length}\n✅ Стёкол: ${lines(rows).reduce((n,x)=>n+x.count,0)}\n📐 Общая площадь: ${areaDisplay(lines(done))} м² (только выполненные)\n\n✅ Выполнено: ${done.length} заявок · ${areaDisplay(lines(done))} м²\n❌ Не выполнено: ${pending.length} заявок · ${areaDisplay(lines(pending))} м²`;}
+ reportDate(argument){
+  const m=/^(\d{2})\.(\d{2})\.(\d{4})$/.exec(argument);
+  if(!m)throw new InputError('Формат: /day или /day ДД.ММ.ГГГГ');
+  const date=new Date(Date.UTC(+m[3],+m[2]-1,+m[1]));
+  if(date.getUTCFullYear()!==+m[3]||date.getUTCMonth()!==+m[2]-1||date.getUTCDate()!==+m[1])throw new InputError('Укажите существующую дату.');
+  return `${m[3]}-${m[2]}-${m[1]}`;
+ }
+ // One-time legacy archive, inside the caller's transaction. Subsequent periods
+ // use explicit membership and never filter orders by their creation date.
+ ensureReports(){
+  if(this.config('report_periods_initialized'))return;
+  const today=localDay(Date.now()),groups=new Map();
+  for(const o of this.q('SELECT id,data,status,created FROM orders ORDER BY id')){
+   const day=localDay(o.created);if(day>=today)continue;
+   if(!groups.has(day))groups.set(day,[]);groups.get(day).push(o);
+  }
+  for(const [day,rows] of [...groups].sort(([a],[b])=>a.localeCompare(b))){
+   const id=this.one('INSERT INTO day_reports(day,closed,legacy) VALUES (?,?,1) RETURNING id',day,now()).id;
+   for(const o of rows)this.q('INSERT INTO report_orders VALUES (?,?,?,?)',o.id,id,o.data,o.status);
+  }
+  this.setConfig('report_periods_initialized',true);
+ }
+ openReportOrders(){return this.q('SELECT id,data,status FROM orders o WHERE NOT EXISTS (SELECT 1 FROM report_orders r WHERE r.order_id=o.id) ORDER BY id');}
+ nextReportDay(){
+  const today=localDay(Date.now()),last=this.one('SELECT day FROM day_reports WHERE legacy=0 ORDER BY id DESC LIMIT 1');
+  const next=last?new Date(Date.parse(last.day+'T00:00:00Z')+86400000).toISOString().slice(0,10):today;
+  return next>today?next:today;
+ }
+ formatReport(day,rows,label){
+  const done=rows.filter(o=>[2,3].includes(o.status)),pending=rows.filter(o=>![2,3].includes(o.status)),lines=list=>list.flatMap(o=>JSON.parse(o.data).lines||[]);
+  return `📊 Итоги за ${day.split('-').reverse().join('.')}\n${label}\n\n📋 Заявок: ${rows.length}\n✅ Стёкол: ${lines(rows).reduce((n,x)=>n+x.count,0)}\n📐 Общая площадь: ${areaDisplay(lines(done))} м² (только выполненные)\n\n✅ Выполнено: ${done.length} заявок · ${areaDisplay(lines(done))} м²\n❌ Не выполнено: ${pending.length} заявок · ${areaDisplay(lines(pending))} м²`;
+ }
+ savedReport(report){
+  const rows=this.q('SELECT r.data,r.status FROM report_orders r JOIN orders o ON o.id=r.order_id WHERE r.report_id=? ORDER BY r.order_id',report.id);
+  return this.formatReport(report.day,rows,report.legacy?'Архив до перехода на отчётные периоды (по дате отправки)':`Отчёт №${report.id} · заявки после предыдущего отчёта`);
+ }
+ dayReport(argument=''){
+  const day=argument?this.reportDate(argument):null;this.ensureReports();
+  if(day){const reports=this.q('SELECT * FROM day_reports WHERE day=? ORDER BY id',day);return reports.length?reports.map(r=>this.savedReport(r)).join('\n\n'):this.formatReport(day,[],'Закрытых отчётов за эту дату нет. Текущий период не закрыт.');}
+  return this.formatReport(this.nextReportDay(),this.openReportOrders(),'Текущий отчётный период · после предыдущего отчёта');
+ }
+ closeDayReport(argument=''){
+  if(argument)return this.dayReport(argument);
+  this.ensureReports();const rows=this.openReportOrders(),last=this.one('SELECT * FROM day_reports WHERE legacy=0 ORDER BY id DESC LIMIT 1');
+  // Repeated commands without new orders reuse the saved report.
+  if(!rows.length&&last)return this.savedReport(last);
+  const day=this.nextReportDay(),closed=now(),id=this.one('INSERT INTO day_reports(day,closed) VALUES (?,?) RETURNING id',day,closed).id;
+  for(const o of rows)this.q('INSERT INTO report_orders VALUES (?,?,?,?)',o.id,id,o.data,o.status);
+  return this.savedReport({id,day,closed,legacy:0});
+ }
  repostPending(){const g=this.config('group');if(!g)return 0;this.q("INSERT OR IGNORE INTO group_reposts SELECT id,?,? FROM orders o WHERE status=0 AND (SELECT action FROM events e WHERE e.order_id=o.id AND e.action LIKE 'Статус:%' ORDER BY id DESC LIMIT 1)='Статус: Не выполнено'",g.id,g.thread_id||null);return this.one('SELECT COUNT(*) AS n FROM group_reposts WHERE chat_id=?',g.id).n;}
  pendingCount(){return this.one("SELECT COUNT(*) AS n FROM orders o WHERE status=0 AND (SELECT action FROM events e WHERE e.order_id=o.id AND e.action LIKE 'Статус:%' ORDER BY id DESC LIMIT 1)='Статус: Не выполнено'").n;}
  dayRich(text){const escape=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');return {html:'<img src="tg://photo?id=day"/>'+text.split('\n\n').map(p=>'<p>'+escape(p).replaceAll('\n','<br>')+'</p>').join(''),media:[{id:'day',media:{type:'photo',media:'attach://banner'}}],skip_entity_detection:true};}
  queueDayReport(report,threadId){const g=this.config('group');if(!g)return;const id=this.enqueue('sendRichMessage',{chat_id:g.id,rich_message:this.dayRich(report),_status_banner:'day',...(threadId?{message_thread_id:threadId}:{})});this.q('INSERT INTO report_reposts VALUES (?,?)',id,g.id);}
- privateDay(uid,text){const report=this.dayReport(text.trim().split(/\s+/).slice(1).join(' ')),g=this.config('group'),count=this.pendingCount();if(g)this.queueDayReport(report,g.thread_id);const summary=report+(g?`\n\n🔁 После отчёта в группе «${g.title}» будут повторно отправлены заявки со статусом «Не выполнено»: ${count}.`:'\n\nГруппа сотрудников пока не подключена. Повторная отправка заявок недоступна.');this.enqueue('sendRichMessage',{chat_id:uid,rich_message:this.dayRich(summary),_status_banner:'day'});}
+ privateDay(uid,text){const report=this.closeDayReport(text.trim().split(/\s+/).slice(1).join(' ')),g=this.config('group'),count=this.pendingCount();if(g)this.queueDayReport(report,g.thread_id);const summary=report+(g?`\n\n🔁 После отчёта в группе «${g.title}» будут повторно отправлены заявки со статусом «Не выполнено»: ${count}.`:'\n\nГруппа сотрудников пока не подключена. Повторная отправка заявок недоступна.');this.enqueue('sendRichMessage',{chat_id:uid,rich_message:this.dayRich(summary),_status_banner:'day'});}
  requestDeletion(uid,text){
   if(!this.isAdmin(uid))return this.send(uid,'Удалять заявки может только администратор бота.');
   const match=/^\/delete(?:@\w+)?\s+(?:GA-)?(\d+)$/i.exec(text.trim());if(!match)return this.send(uid,'🗑 Для удаления заявки отправьте /delete GA-000003 (или /delete 3). Бот покажет заявку и попросит подтвердить удаление.');
@@ -154,7 +206,7 @@ export class Engine {
   this.rememberUser(from);this.q('INSERT INTO deleted_orders VALUES (?,?,?,?)',o.id,uid,displayName(from),now());
   const cards=this.q('SELECT chat_id,message_id FROM group_cards WHERE order_id=? UNION SELECT chat_id,message_id FROM group_copies WHERE order_id=? UNION SELECT chat_id,message_id FROM status_reactions WHERE order_id=?',o.id,o.id,o.id);
   this.q('UPDATE outbox SET failed=2 WHERE id IN (SELECT outbox_id FROM outbox_meta WHERE order_id=?) OR id IN (SELECT outbox_id FROM reaction_outbox WHERE order_id=?) OR id IN (SELECT outbox_id FROM repost_deliveries WHERE order_id=?)',o.id,o.id,o.id);
-  for(const table of ['group_jobs','group_reposts','group_cards','group_copies','status_reactions','reaction_jobs','deletion_requests'])this.q(`DELETE FROM ${table} WHERE order_id=?`,o.id);
+  for(const table of ['group_jobs','group_reposts','group_cards','group_copies','status_reactions','reaction_jobs','deletion_requests','report_orders'])this.q(`DELETE FROM ${table} WHERE order_id=?`,o.id);
   this.q('DELETE FROM orders WHERE id=?',o.id);this.q('DELETE FROM events WHERE order_id=?',o.id);
   for(const card of cards)if(card.chat_id===this.config('group')?.id)this.queueRemoval(o.id,card.chat_id,card.message_id);
   respond(`🗑 Заявка ${code(o.id)} удалена. Исключена из отчётов и повторных отправок.`);
@@ -221,7 +273,7 @@ export class Engine {
    this.q('UPDATE orders SET status=?,version=version+1,updated=? WHERE id=? AND version=?',state,now(),oid,version);this.event(oid,uid,'Статус: '+completionText(state));this.queueReaction(oid,m.chat.id,m.message_id,state,version+1);this.notify(oid);return ack(completionText(state));
   }
   const command=(m.text||'').trim().split(/\s+/)[0].split('@')[0].toLowerCase();
-  if(command==='/day'&&g?.id===m.chat.id&&access.groupMember){try{this.queueDayReport(this.dayReport((m.text||'').trim().split(/\s+/).slice(1).join(' ')),m.message_thread_id||g.thread_id);}catch(error){if(!(error instanceof InputError))throw error;this.send(g.id,error.message);}return;}
+  if(command==='/day'&&g?.id===m.chat.id&&access.groupMember){try{this.queueDayReport(this.closeDayReport((m.text||'').trim().split(/\s+/).slice(1).join(' ')),m.message_thread_id||g.thread_id);}catch(error){if(!(error instanceof InputError))throw error;this.send(g.id,error.message);}return;}
   if(command==='/bindgroup'){
    if(!this.isAdmin(uid))return this.send(m.chat.id,'Для подключения нужны права администратора бота GlassArt. Узнайте свой ID командой /id в личном чате с ботом и попросите действующего администратора выполнить /addadmin ID.');
    if(!access.botAdmin)return this.send(m.chat.id,'Назначьте самого бота GlassArt администратором этой группы, затем повторите /bindgroup.');
