@@ -288,6 +288,12 @@ test('old completion events and later field edits add no area to a new period',t
  assert.deepEqual(e.openReportOrders().map(o=>o.id),[2]);
  f.send('/day');assert.match(f.messages().at(-1).text,/Выполнено: 1 заявок · 4 м²/);
  assert.deepEqual(e.q('SELECT order_id FROM report_completions').map(o=>o.order_id),[2]);
+ const report=e.one('SELECT * FROM day_reports ORDER BY id DESC LIMIT 1');
+ e.q('INSERT INTO report_completions SELECT id,?,data,status FROM orders WHERE id=1',report.id);
+ t.mock.timers.setTime(Date.parse('2026-11-27T14:00:00Z'));
+ e.event(1,100,'Статус: Выполнено');
+ assert.match(e.dayReport('26.11.2026'),/Выполнено: 1 заявок · 4 м²/);
+ assert.equal(e.q('SELECT * FROM report_completions WHERE report_id=?',report.id).length,2);
 });
 
 test('a carried order contributes area once when completed on the fourth day',t=>{

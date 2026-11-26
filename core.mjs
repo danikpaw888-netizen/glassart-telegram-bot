@@ -227,11 +227,14 @@ export class Engine {
   return `📊 Итоги за ${day.split('-').reverse().join('.')}\n${label}\n\n📋 Заявок: ${rows.length}\n✅ Стёкол: ${count(orders)-mirrorCount}${mirrorCount?'\n🪞 Зеркал: '+mirrorCount:''}\n📐 Общая площадь: ${doneArea} м² (только выполненные)\n${breakdown}\n\n✅ Выполнено: ${done.length} заявок · ${doneArea} м²\n❌ Не выполнено: ${pending.length} заявок · ${areaDisplay(lines(pending))} м²`;
  }
  savedReport(report){
+  const previous=this.one('SELECT closed FROM day_reports WHERE legacy=0 AND id<? ORDER BY id DESC LIMIT 1',report.id);
   const rows=this.q(`SELECT r.data,r.status FROM (
    SELECT order_id,data,status FROM report_orders WHERE report_id=?
    UNION ALL
-   SELECT order_id,data,status FROM report_completions WHERE report_id=?
-  ) r JOIN orders o ON o.id=r.order_id ORDER BY r.order_id`,report.id,report.id);
+   SELECT c.order_id,c.data,c.status FROM report_completions c WHERE c.report_id=?
+   AND EXISTS (SELECT 1 FROM events e WHERE e.order_id=c.order_id AND e.action='Статус: Выполнено'
+    AND e.at>=? AND e.at<=?)
+  ) r JOIN orders o ON o.id=r.order_id ORDER BY r.order_id`,report.id,report.id,previous?.closed||'',report.closed);
   return this.formatReport(report.day,rows,report.legacy?'Архив до перехода на отчётные периоды (по дате отправки)':`Отчёт №${report.id} · заявки за период`);
  }
  dayReport(argument=''){
