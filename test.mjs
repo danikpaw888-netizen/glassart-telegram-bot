@@ -63,6 +63,50 @@ test('photos are rejected and removed from cards and edit controls',()=>{
  const f=fixture();f.fill(false);assert.equal(f.engine.session(100).step,'preview');f.send(null,{photo:'rejected-file-id'});assert.equal(f.engine.session(100).step,'preview');assert.equal('photos' in f.engine.session(100).data,false);f.action('edit');assert.ok(!f.messages().at(-1).reply_markup.inline_keyboard.flat().some(x=>x.callback_data.includes('photos')));f.action('preview');f.action('save');f.send(null,{callback:'photos:1'});assert.equal(f.engine.q("SELECT id FROM outbox WHERE method='sendPhoto'").length,0);
  for(const m of f.messages()){assert.ok(m.text.length<=4096);for(const b of m.reply_markup?.inline_keyboard.flat()||[])assert.ok(new TextEncoder().encode(b.callback_data).length<=64);}
 });
+
+test('a mirror sketch stays on the group card and completed area is split by product',()=>{
+ const f=fixture(),e=f.engine;
+ e.bindGroup({id:-1001,title:'Цех'});
+ f.fill();
+ f.send('/new');f.send('Клиент');f.send('Плёнка');f.send('2000 × 1000');
+ f.action('done');f.action('processing_no');f.send('6');f.action('skip');f.action('save');
+ f.send('/menu');const menu=f.messages().findLast(x=>x.text.startsWith('GlassArt · Отправка заявок'));
+ assert.ok(menu.reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='new_mirror'));
+ f.send(null,{callback:'new_mirror'});f.send('Клиент зеркала');
+ assert.equal(e.session(100).step,'lines');
+ f.send('1500 × 1000');f.action('done');f.action('processing_yes');f.send('6');f.send('Скруглить углы');
+ f.send(null,{photo:'first-sketch'});assert.match(f.messages().at(-1).text,/Фото приложено/);
+ f.action('edit');f.action('field_mirror_photo');f.action('mirror_photo_remove');
+ assert.doesNotMatch(f.messages().at(-1).text,/Фото приложено/);
+ f.action('edit');f.action('field_mirror_photo');f.send(null,{photo:'final-sketch'});f.action('save');
+ assert.equal(e.get(3).data.kind,'mirror');
+ assert.equal(e.get(3).data.mirrorPhoto,'final-sketch');
+ assert.equal(e.get(3).data.film,undefined);
+ const cards=f.deliver().filter(x=>x.chat_id===-1001&&x.rich_message);
+ const mirror=cards.find(x=>x.text.includes('GA-000003'));
+ assert.match(mirror.text,/Площадь по габаритам: 1.5 м²/);
+ assert.doesNotMatch(mirror.text,/Плёнка/);
+ assert.match(mirror.rich_message.html,/tg:\/\/photo\?id=mirror/);
+ assert.deepEqual(mirror.rich_message.media,[{id:'mirror',media:{type:'photo',media:'final-sketch'}}]);
+ const group={group:true,uid:500,access:{groupMember:true}};
+ for(const [i,card] of cards.entries())f.send(null,{...group,messageId:card.message_id,callback:`g:${i+1}:1:${i===2?0:3}`});
+ const edited=f.deliver().find(x=>x.method==='editMessageText'&&x.message_id===mirror.message_id&&x.rich_message);
+ assert.deepEqual(edited.rich_message.media.map(m=>m.id),['status','mirror']);
+ f.send('/day',group);
+ const first=f.messages().at(-1).text;
+ assert.match(first,/Общая площадь: 6 м²/);
+ assert.match(first,/Тонировка 4 мм — 4 м² · периметр 13\.4 м/);
+ assert.match(first,/Тонировка 6 мм — 2 м² · периметр 6 м/);
+ assert.match(first,/Зеркала — 0 м² · периметр по габаритам 0 м/);
+ const repost=f.deliver().find(x=>x.method==='sendRichMessage'&&x.text?.includes('GA-000003'));
+ assert.equal(repost.rich_message.media[1].media.media,'final-sketch');
+ f.send(null,{...group,messageId:repost.message_id,callback:'g:3:2:3'});f.deliver();
+ f.send('/day',group);
+ const second=f.messages().at(-1).text;
+ assert.match(second,/Тонировка 6 мм — 0 м²/);
+ assert.match(second,/Зеркала — 1\.5 м² · периметр по габаритам 5 м/);
+ assert.match(second,/Общая площадь: 1.5 м²/);
+});
 test('transaction rollback does not acknowledge a failed event',()=>{
  const f=fixture();assert.throws(()=>f.transaction(()=>{f.engine.handle({update_id:500,message:{from:{id:100},chat:{id:100,type:'private'},text:'/new'}});throw Error('fail');}));assert.equal(f.engine.session(100),null);assert.equal(f.engine.one('SELECT id FROM processed WHERE id=500'),undefined);
 });

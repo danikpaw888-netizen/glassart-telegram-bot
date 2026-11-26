@@ -102,28 +102,58 @@ export class Engine {
   for(const line of text.split('\n')){if(part.length+line.length>3400){chunks.push(part);part='';}part+=line+'\n';}chunks.push(part);
   chunks.forEach((text,index)=>{const params={chat_id:uid,text:text.trim()||'—'};if(rows&&index===chunks.length-1)params.reply_markup={inline_keyboard:rows.map(row=>row.map(([text,callback_data])=>({text,callback_data})))};this.enqueue('sendMessage',params);});
  }
- menu(uid){const rows=[[['＋ Новая заявка','new']],[['📝 Продолжить черновик','resume']]];if(this.isAdmin(uid))rows.push([['👥 Администраторы','manage_admins']],[['🗑 Удалить заявку','delete_help']],[['Группа сотрудников','group_help']]);this.send(uid,'GlassArt · Отправка заявок\nЗаполните заявку здесь. Все заявки и кнопки выполнения находятся в группе сотрудников.\nЧерновик сохраняется автоматически. /cancel — отменить ввод.\n/day — завершить период и сохранить отчёт; /day ДД.ММ.ГГГГ — посмотреть закрытый отчёт. Новые заявки попадут в следующий отчёт; заявки со статусом «Не выполнено» повторяются в группе сотрудников.',rows);}
+ menu(uid){const rows=[[['＋ Новая заявка','new']],[['🪞 Заявка на зеркало','new_mirror']],[['📝 Продолжить черновик','resume']]];if(this.isAdmin(uid))rows.push([['👥 Администраторы','manage_admins']],[['🗑 Удалить заявку','delete_help']],[['Группа сотрудников','group_help']]);this.send(uid,'GlassArt · Отправка заявок\nЗаполните заявку здесь. Все заявки и кнопки выполнения находятся в группе сотрудников.\nЧерновик сохраняется автоматически. /cancel — отменить ввод.\n/day — завершить период и сохранить отчёт; /day ДД.ММ.ГГГГ — посмотреть закрытый отчёт. Новые заявки попадут в следующий отчёт; заявки со статусом «Не выполнено» повторяются в группе сотрудников.',rows);}
  groupHelp(uid){if(!this.isAdmin(uid))return;const g=this.config('group');this.send(uid,(g?`Группа: ${g.title}\n`:'Группа сотрудников пока не подключена.\n')+'Добавьте @'+(this.config('username')||'GlassArtWork_bot')+' в нужную группу и назначьте администратором. Затем от своего аккаунта отправьте в группе /bindgroup. Вы должны быть администратором этого бота и участником группы. Сохраненные заявки тоже поступят туда.');}
  adminPanel(uid){if(!this.isAdmin(uid))return this.send(uid,'Управление администраторами доступно только администраторам.');this.send(uid,`Администраторы GlassArt:\n${this.adminIds().map(id=>'• ID '+id).join('\n')}\n\nДля назначения нужен числовой Telegram ID. Будущий администратор может получить его командой /id у этого бота.`,[[['＋ Добавить администратора','admin_add']],[['Снять права администратора','admin_remove']],[['Главное меню','menu']]]);}
  drows(s,rows){return rows.map(row=>row.map(([label,action])=>[label,`d:${s.token}:${s.rev}:${action}`]));}
  glassLine(x,i){return `${i+1}. ${x.width} × ${x.height} мм × ${x.count}\n   Обработка: ${x.processing===true?'есть':x.processing===false?'нет':'не указана'} · Толщина: ${x.thickness?x.thickness.replace('.',',')+' мм':'не указана'}`;}
- card(d,title){const lines=d.lines||[],shared=lines.length&&lines.every(x=>x.thickness===lines[0].thickness&&x.processing===lines[0].processing),first=lines[0]||{},processing=x=>x.processing===true?'Есть обработка':x.processing===false?'Без обработки':'Не указана';return [title,'',`🧊 Толщина стекла: ${shared?(first.thickness?first.thickness.replace('.',',')+' мм':'не указана'):'указана по позициям'}`,`📦 Плёнка: ${d.film||'—'}`,`🪟 Обработка края: ${shared?processing(first):'указана по позициям'}`,`📏 Общий периметр: ${perimeterDisplay(lines)} м`,'',...lines.map(x=>`${x.width}x${x.height} мм — ${x.count} шт, площадь ${areaDisplay([x])} м²`+(!shared?`\n   Толщина: ${x.thickness?x.thickness.replace('.',',')+' мм':'не указана'} · ${processing(x)}`:'')),'','────────────────',`✅ Стёкол: ${lines.reduce((n,x)=>n+x.count,0)}`,`📐 Площадь: ${areaDisplay(lines)} м²`,'Минимум за одно стекло — 0,3 м².','',`👤 Заказчик: ${d.customer||'—'}`,...(d.comment?[`💬 ${d.comment}`]:[])].join('\n');}
+ card(d,title){
+  const lines=d.lines||[],mirror=d.kind==='mirror',first=lines[0]||{};
+  const shared=lines.length&&lines.every(x=>x.thickness===first.thickness&&x.processing===first.processing);
+  const thickness=x=>x.thickness?String(x.thickness).replace('.',',')+' мм':'не указана';
+  const processing=x=>x.processing===true?'Есть обработка':x.processing===false?'Без обработки':'Не указана';
+  return [title,'',`🧊 Толщина ${mirror?'зеркала':'стекла'}: ${shared?thickness(first):'указана по позициям'}`,
+   mirror?'🪞 Изделие: зеркало':`📦 Плёнка: ${d.film||'—'}`,
+   `🪟 Обработка края: ${shared?processing(first):'указана по позициям'}`,
+   `📏 Общий периметр${mirror?' по габаритам':''}: ${perimeterDisplay(lines)} м`,'',
+   ...lines.map(x=>`${x.width}x${x.height} мм — ${x.count} шт, площадь ${areaDisplay([x])} м²`+
+    (!shared?`\n   Толщина: ${thickness(x)} · ${processing(x)}`:'')),
+   '','────────────────',`✅ ${mirror?'Зеркал':'Стёкол'}: ${lines.reduce((n,x)=>n+x.count,0)}`,
+   `📐 Площадь${mirror?' по габаритам':''}: ${areaDisplay(lines)} м²`,
+   `Минимум за одно ${mirror?'зеркало':'стекло'} — 0,3 м².`,'',`👤 Заказчик: ${d.customer||'—'}`,
+   ...(d.comment?[`💬 ${d.comment}`]:[]),...(mirror&&d.mirrorPhoto?['📎 Фото приложено']:[])].join('\n');
+ }
  prompt(uid,s){
   const step=s.step;
+  const mirror=s.data.kind==='mirror';
   if(step==='preview')return this.send(uid,this.card(s.data,'📋 Ваш расчёт:'),this.drows(s,[[['✅ Отправить заявку','save']],[['✏️ Исправить','edit']],[['Отменить ввод','cancel']]]));
-  if(step==='edit_menu')return this.send(uid,'Какое поле исправить? При замене стекол прежний список заменяется.',this.drows(s,[...Object.entries(FIELDS).map(([k,label])=>[[label,'field_'+k]]),[['Вернуться к проверке','preview']]]));
+  if(step==='edit_menu')return this.send(uid,'Какое поле исправить? При замене размеров прежний список заменяется.',this.drows(s,[...Object.entries(FIELDS).filter(([k])=>!mirror||k!=='film').map(([k,label])=>[[label,'field_'+k]]),...(mirror?[[['Фото или эскиз','field_mirror_photo']]]:[]),[['Вернуться к проверке','preview']]]));
+  if(step==='mirror_photo'){
+   const keep=s.data.mirrorPhoto?[['Оставить фото','mirror_photo_done'],['Удалить фото','mirror_photo_remove']]:[['Пропустить','mirror_photo_done']];
+   return this.send(uid,'Приложите одно фото или эскиз зеркала обычным фото в Telegram. Для фигурного зеркала покажите форму и скругления. Площадь рассчитывается по введённым габаритам.',this.drows(s,[keep,[['Отменить ввод','cancel']]]));
+  }
   const rows=[];
   if(step==='comment')rows.push([['Пропустить','skip']]);
   if(step==='processing')rows.push([['Есть обработка','processing_yes'],['Без обработки','processing_no']]);
   if(step==='lines'){rows.push([['Готово','done']]);if(s.data.lines.length)rows.push([['Убрать последнее','remove']]);}
-  rows.push([['Отменить ввод','cancel']]);this.send(uid,(step==='thickness'?`📏 Общий периметр стёкол: ${perimeterDisplay(s.data.lines)} м (с учётом количества).\n\n`:'')+PROMPTS[step],this.drows(s,rows));
+  rows.push([['Отменить ввод','cancel']]);
+  const prompt=mirror&&step==='lines'?'Введите ширину, высоту и количество зеркал в мм. Например: 1200 × 800 × 2. Для фигурного зеркала укажите максимальную ширину и высоту.':PROMPTS[step];
+  this.send(uid,(step==='thickness'?`📏 Общий периметр ${mirror?'зеркал по габаритам':'стёкол'}: ${perimeterDisplay(s.data.lines)} м (с учётом количества).\n\n`:'')+prompt,this.drows(s,rows));
  }
- start(uid,author,order){
+ start(uid,author,order,kind){
   const s={mode:'draft',schemaVersion:4,token:crypto.randomUUID().replaceAll('-','').slice(0,10),rev:0,step:'customer',data:{lines:[]},author};
+  if(kind==='mirror')s.data.kind=kind;
   if(order)Object.assign(s,{data:order.data,step:'edit_menu',editId:order.id,version:order.version});
   this.put(uid,s);this.prompt(uid,s);
  }
- next(uid,s){if(s.returnPreview){s.step='preview';delete s.returnPreview;}else s.step=STEPS[STEPS.indexOf(s.step)+1]||'preview';this.put(uid,s);this.prompt(uid,s);}
+ next(uid,s){
+  if(s.returnPreview){s.step='preview';delete s.returnPreview;}
+  else if(s.data.kind==='mirror'&&s.step==='customer')s.step='lines';
+  else if(s.data.kind==='mirror'&&s.step==='comment')s.step='mirror_photo';
+  else if(s.step==='mirror_photo')s.step='preview';
+  else s.step=STEPS[STEPS.indexOf(s.step)+1]||'preview';
+  this.put(uid,s);this.prompt(uid,s);
+ }
  completeLines(uid,s){
   if(typeof s.data.processing!=='boolean')s.step='processing';
   else if(!s.data.thickness)s.step='thickness';
@@ -170,8 +200,28 @@ export class Engine {
   return next>today?next:today;
  }
  formatReport(day,rows,label){
-  const done=rows.filter(o=>[2,3].includes(o.status)),pending=rows.filter(o=>![2,3].includes(o.status)),lines=list=>list.flatMap(o=>JSON.parse(o.data).lines||[]);
-  return `📊 Итоги за ${day.split('-').reverse().join('.')}\n${label}\n\n📋 Заявок: ${rows.length}\n✅ Стёкол: ${lines(rows).reduce((n,x)=>n+x.count,0)}\n📐 Общая площадь: ${areaDisplay(lines(done))} м² (только выполненные)\n\n✅ Выполнено: ${done.length} заявок · ${areaDisplay(lines(done))} м²\n❌ Не выполнено: ${pending.length} заявок · ${areaDisplay(lines(pending))} м²`;
+  const orders=rows.map(o=>({status:o.status,data:JSON.parse(o.data)}));
+  const done=orders.filter(o=>[2,3].includes(o.status)),pending=orders.filter(o=>![2,3].includes(o.status));
+  const lines=list=>list.flatMap(o=>o.data.lines||[]);
+  const categories={four:[],six:[],mirror:[],other:[]};
+  for(const {data} of done){
+   for(const line of data.lines||[]){
+    const thickness=Number(String(line.thickness??data.thickness).replace(',','.'));
+    const category=data.kind==='mirror'?'mirror':thickness===4?'four':thickness===6?'six':'other';
+    categories[category].push(line);
+   }
+  }
+  const count=list=>lines(list).reduce((n,x)=>n+x.count,0);
+  const mirrorCount=count(orders.filter(o=>o.data.kind==='mirror')),doneArea=areaDisplay(lines(done));
+  const categoryTotals=(label,items,perimeterLabel='периметр')=>
+   `• ${label} — ${areaDisplay(items)} м² · ${perimeterLabel} ${perimeterDisplay(items)} м`;
+  const breakdown=[
+   categoryTotals('Тонировка 4 мм',categories.four),
+   categoryTotals('Тонировка 6 мм',categories.six),
+   categoryTotals('Зеркала',categories.mirror,'периметр по габаритам'),
+   ...(categories.other.length?[categoryTotals('Остальная тонировка',categories.other)]:[])
+  ].join('\n');
+  return `📊 Итоги за ${day.split('-').reverse().join('.')}\n${label}\n\n📋 Заявок: ${rows.length}\n✅ Стёкол: ${count(orders)-mirrorCount}${mirrorCount?'\n🪞 Зеркал: '+mirrorCount:''}\n📐 Общая площадь: ${doneArea} м² (только выполненные)\n${breakdown}\n\n✅ Выполнено: ${done.length} заявок · ${doneArea} м²\n❌ Не выполнено: ${pending.length} заявок · ${areaDisplay(lines(pending))} м²`;
  }
  savedReport(report){
   const rows=this.q(`SELECT r.data,r.status FROM (
@@ -229,7 +279,15 @@ export class Engine {
  }
  removedCardText(oid){const r=this.one('SELECT name FROM deleted_orders WHERE order_id=?',oid);return `🗑 Заявка ${code(oid)} удалена администратором${r?.name?' '+r.name:''}.`;}
  bannerKey(o){return this.one("SELECT id FROM events WHERE order_id=? AND action LIKE 'Статус:%' LIMIT 1",o.id)||[2,3].includes(o.status)?([2,3].includes(o.status)?'done':'pending'):null;}
- groupRich(o){const key=this.bannerKey(o),escape=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');return {html:(key?'<img src="tg://photo?id=status"/>':'')+this.groupText(o).split('\n\n').map(p=>'<p>'+escape(p).replaceAll('\n','<br>')+'</p>').join(''),...(key?{media:[{id:'status',media:{type:'photo',media:'attach://banner'}}]}:{}),skip_entity_detection:true};}
+ groupRich(o){
+  const key=this.bannerKey(o),photo=o.data.kind==='mirror'&&o.data.mirrorPhoto,media=[];
+  if(key)media.push({id:'status',media:{type:'photo',media:'attach://banner'}});
+  if(photo)media.push({id:'mirror',media:{type:'photo',media:photo}});
+  const escape=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+  const body=this.groupText(o).split('\n\n').map(p=>'<p>'+escape(p).replaceAll('\n','<br>')+'</p>').join('');
+  const html=(key?'<img src="tg://photo?id=status"/>':'')+body+(photo?'<img src="tg://photo?id=mirror"/>':'');
+  return {html,...(media.length?{media}:{}),skip_entity_detection:true};
+ }
  pruneDeliveryMetadata(){for(const table of ['report_reposts','repost_deliveries','removal_outbox','reaction_outbox'])this.q(`DELETE FROM ${table} WHERE outbox_id NOT IN (SELECT id FROM outbox)`);}
  migrateBanners(){
   // Cancel old card deliveries before rebuilding their single-message format.
@@ -300,15 +358,16 @@ export class Engine {
  get(oid){const order=this.one('SELECT * FROM orders WHERE id=?',oid);if(order)order.data=JSON.parse(order.data);return order;}
  event(oid,uid,action){this.q('INSERT INTO events(order_id,actor,action,at) VALUES (?,?,?,?)',oid,uid,action,now());}
  save(uid,s){
-  const d=s.data;
-  if(!d.customer||!d.film||!d.lines.length)throw new InputError('Заполните клиента, пленку и хотя бы один размер.');
+  const d=s.data,mirror=d.kind==='mirror';
+  if(!d.customer||!d.lines.length||(!mirror&&!d.film))throw new InputError(mirror?'Заполните клиента и хотя бы один размер зеркала.':'Заполните клиента, пленку и хотя бы один размер.');
   if(!s.editId&&(typeof d.processing!=='boolean'||!d.thickness)){s.returnPreview=true;return this.completeLines(uid,s);}
   const clean={customer:d.customer,film:d.film,lines:d.lines,processing:d.processing,thickness:d.thickness,comment:d.comment||''};
+  if(mirror){clean.kind=d.kind;if(d.mirrorPhoto)clean.mirrorPhoto=d.mirrorPhoto;}
   if(Array.isArray(d.photos)&&d.photos.length)clean.photos=d.photos;
   const data=JSON.stringify(clean),search=['customer','film','comment'].map(k=>d[k]||'').join(' ').toLowerCase();let oid=s.editId;
   if(oid){const changed=this.q('UPDATE orders SET data=?,search_text=?,updated=?,version=version+1 WHERE id=? AND version=? RETURNING id',data,search,now(),oid,s.version);if(!changed.length)return this.send(uid,'Заявка уже изменилась в группе. Черновик сохранен. При необходимости отмените его и отправьте новую заявку.');this.event(oid,uid,'Изменение полей');}
   else {oid=this.one('INSERT INTO orders(token,data,search_text,created,updated,creator,author) VALUES (?,?,?,?,?,?,?) RETURNING id',s.token,data,search,now(),now(),uid,s.author).id;this.event(oid,uid,'Создание');}
-  this.clear(uid);this.send(uid,`✅ Заявка ${code(oid)} сохранена. ${this.config('group')?'Поставлена в очередь отправки в группу сотрудников.':'Будет отправлена после подключения группы сотрудников.'}`,[[['＋ Следующая заявка','new']]]);this.notify(oid);
+  this.clear(uid);this.send(uid,`✅ Заявка ${code(oid)} сохранена. ${this.config('group')?'Поставлена в очередь отправки в группу сотрудников.':'Будет отправлена после подключения группы сотрудников.'}`,[[['＋ Следующая заявка','new']],[['🪞 Заявка на зеркало','new_mirror']]]);this.notify(oid);
  }
  draftAction(uid,value){
   const [,token,rev,action]=value.split(':'),s=this.session(uid);
@@ -318,7 +377,13 @@ export class Engine {
   if(action==='save'&&step==='preview')return this.save(uid,s);
   if(['edit','preview'].includes(action)&&['preview','edit_menu'].includes(step)){s.step=action==='edit'?'edit_menu':'preview';this.put(uid,s);return this.prompt(uid,s);}
   if(action==='field_photos')return this.prompt(uid,s);
-  if(action.startsWith('field_')&&step==='edit_menu'&&Object.hasOwn(FIELDS,action.slice(6))){s.step=action.slice(6);s.returnPreview=true;if(s.step==='lines')s.data.lines=[];this.put(uid,s);return this.prompt(uid,s);}
+  const mirror=s.data.kind==='mirror';
+  if(action==='field_mirror_photo'&&step==='edit_menu'&&mirror){s.step='mirror_photo';s.returnPreview=true;this.put(uid,s);return this.prompt(uid,s);}
+  if(step==='mirror_photo'&&mirror&&['mirror_photo_done','mirror_photo_remove'].includes(action)){
+   if(action==='mirror_photo_remove')delete s.data.mirrorPhoto;
+   return this.next(uid,s);
+  }
+  if(action.startsWith('field_')&&step==='edit_menu'&&Object.hasOwn(FIELDS,action.slice(6))&&!(mirror&&action==='field_film')){s.step=action.slice(6);s.returnPreview=true;if(s.step==='lines')s.data.lines=[];this.put(uid,s);return this.prompt(uid,s);}
   if(action==='skip'&&step==='comment'){s.data[step]='';return this.next(uid,s);}
   if(['processing_yes','processing_no'].includes(action)&&step==='processing'){s.data.processing=action==='processing_yes';return this.completeLines(uid,s);}
   if(action==='done'&&step==='lines'){if(!s.data.lines.length)throw new InputError('Добавьте хотя бы один размер стекла.');return this.completeLines(uid,s);}
@@ -337,13 +402,18 @@ export class Engine {
    this.put(uid,{mode:value});return this.send(uid,value==='admin_add'?'Отправьте числовой Telegram ID нового администратора. Его можно узнать командой /id у этого бота. /cancel — отмена.':'Отправьте числовой Telegram ID администратора, с которого нужно снять права. Он останется сотрудником. /cancel — отмена.');
   }
   if(value==='resume'){const s=this.session(uid);return s?.mode==='draft'?this.prompt(uid,s):this.send(uid,'Черновика нет. Создайте новую заявку.');}
-  if(value==='new'){
+  if(value==='new'||value==='new_mirror'){
    if(this.session(uid)?.mode==='draft')return this.send(uid,'Сначала отправьте или отмените текущий черновик. /resume — продолжить.');
-   return this.start(uid,author);
+   return this.start(uid,author,undefined,value==='new_mirror'?'mirror':undefined);
   }
  }
  input(uid,s,message){
   const text=(message.text||'').trim(),step=s.step;
+  if(step==='mirror_photo'&&s.data.kind==='mirror'){
+   const photo=message.photo?.at(-1)?.file_id;
+   if(typeof photo!=='string'||!photo)throw new InputError('Отправьте обычное фото в Telegram или нажмите кнопку под вопросом.');
+   s.data.mirrorPhoto=photo;return this.next(uid,s);
+  }
   if(message.photo?.length)throw new InputError('Добавление фотографий отключено. Продолжите заполнение заявки текстом или кнопками.');
   if(step==='processing')throw new InputError('Выберите «Есть обработка» или «Без обработки» кнопками под вопросом.');
   if(step==='thickness'){
