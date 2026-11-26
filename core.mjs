@@ -80,6 +80,12 @@ export class Engine {
  session(uid){
   const row=this.one('SELECT data FROM sessions WHERE id=?',uid);if(!row)return null;
   const s=JSON.parse(row.data);
+  if(s.mode==='draft'&&s.step==='mirror_photo'){
+   s.step='preview';
+   delete s.returnPreview;
+   delete s.data.mirrorPhoto;
+   this.put(uid,s);
+  }
   if(s.mode==='draft'&&s.schemaVersion!==4){
    if(['phone','object'].includes(s.step))s.step='film';
    if(s.step==='deadline')s.step='comment';
@@ -127,11 +133,7 @@ export class Engine {
   const step=s.step;
   const mirror=s.data.kind==='mirror';
   if(step==='preview')return this.send(uid,this.card(s.data,'📋 Ваш расчёт:'),this.drows(s,[[['✅ Отправить заявку','save']],[['✏️ Исправить','edit']],[['Отменить ввод','cancel']]]));
-  if(step==='edit_menu')return this.send(uid,'Какое поле исправить? При замене размеров прежний список заменяется.',this.drows(s,[...Object.entries(FIELDS).filter(([k])=>!mirror||k!=='film').map(([k,label])=>[[label,'field_'+k]]),...(mirror?[[['Фото или эскиз','field_mirror_photo']]]:[]),[['Вернуться к проверке','preview']]]));
-  if(step==='mirror_photo'){
-   const keep=s.data.mirrorPhoto?[['Оставить фото','mirror_photo_done'],['Удалить фото','mirror_photo_remove']]:[['Пропустить','mirror_photo_done']];
-   return this.send(uid,'Приложите одно фото или эскиз зеркала обычным фото в Telegram. Для фигурного зеркала покажите форму и скругления. Площадь рассчитывается по введённым габаритам.',this.drows(s,[keep,[['Отменить ввод','cancel']]]));
-  }
+  if(step==='edit_menu')return this.send(uid,'Какое поле исправить? При замене размеров прежний список заменяется.',this.drows(s,[...Object.entries(FIELDS).filter(([k])=>!mirror||k!=='film').map(([k,label])=>[[label,'field_'+k]]),[['Вернуться к проверке','preview']]]));
   const rows=[];
   if(step==='comment')rows.push([['Пропустить','skip']]);
   if(step==='processing')rows.push([['Есть обработка','processing_yes'],['Без обработки','processing_no']]);
@@ -149,8 +151,6 @@ export class Engine {
  next(uid,s){
   if(s.returnPreview){s.step='preview';delete s.returnPreview;}
   else if(s.data.kind==='mirror'&&s.step==='customer')s.step='lines';
-  else if(s.data.kind==='mirror'&&s.step==='comment')s.step='mirror_photo';
-  else if(s.step==='mirror_photo')s.step='preview';
   else s.step=STEPS[STEPS.indexOf(s.step)+1]||'preview';
   this.put(uid,s);this.prompt(uid,s);
  }
@@ -362,7 +362,11 @@ export class Engine {
   if(!d.customer||!d.lines.length||(!mirror&&!d.film))throw new InputError(mirror?'Заполните клиента и хотя бы один размер зеркала.':'Заполните клиента, пленку и хотя бы один размер.');
   if(!s.editId&&(typeof d.processing!=='boolean'||!d.thickness)){s.returnPreview=true;return this.completeLines(uid,s);}
   const clean={customer:d.customer,film:d.film,lines:d.lines,processing:d.processing,thickness:d.thickness,comment:d.comment||''};
-  if(mirror){clean.kind=d.kind;if(d.mirrorPhoto)clean.mirrorPhoto=d.mirrorPhoto;}
+  if(mirror){
+   clean.kind=d.kind;
+   const savedPhoto=s.editId&&this.get(s.editId)?.data.mirrorPhoto;
+   if(savedPhoto)clean.mirrorPhoto=savedPhoto;
+  }
   if(Array.isArray(d.photos)&&d.photos.length)clean.photos=d.photos;
   const data=JSON.stringify(clean),search=['customer','film','comment'].map(k=>d[k]||'').join(' ').toLowerCase();let oid=s.editId;
   if(oid){const changed=this.q('UPDATE orders SET data=?,search_text=?,updated=?,version=version+1 WHERE id=? AND version=? RETURNING id',data,search,now(),oid,s.version);if(!changed.length)return this.send(uid,'Заявка уже изменилась в группе. Черновик сохранен. При необходимости отмените его и отправьте новую заявку.');this.event(oid,uid,'Изменение полей');}
@@ -378,11 +382,6 @@ export class Engine {
   if(['edit','preview'].includes(action)&&['preview','edit_menu'].includes(step)){s.step=action==='edit'?'edit_menu':'preview';this.put(uid,s);return this.prompt(uid,s);}
   if(action==='field_photos')return this.prompt(uid,s);
   const mirror=s.data.kind==='mirror';
-  if(action==='field_mirror_photo'&&step==='edit_menu'&&mirror){s.step='mirror_photo';s.returnPreview=true;this.put(uid,s);return this.prompt(uid,s);}
-  if(step==='mirror_photo'&&mirror&&['mirror_photo_done','mirror_photo_remove'].includes(action)){
-   if(action==='mirror_photo_remove')delete s.data.mirrorPhoto;
-   return this.next(uid,s);
-  }
   if(action.startsWith('field_')&&step==='edit_menu'&&Object.hasOwn(FIELDS,action.slice(6))&&!(mirror&&action==='field_film')){s.step=action.slice(6);s.returnPreview=true;if(s.step==='lines')s.data.lines=[];this.put(uid,s);return this.prompt(uid,s);}
   if(action==='skip'&&step==='comment'){s.data[step]='';return this.next(uid,s);}
   if(['processing_yes','processing_no'].includes(action)&&step==='processing'){s.data.processing=action==='processing_yes';return this.completeLines(uid,s);}
@@ -409,11 +408,6 @@ export class Engine {
  }
  input(uid,s,message){
   const text=(message.text||'').trim(),step=s.step;
-  if(step==='mirror_photo'&&s.data.kind==='mirror'){
-   const photo=message.photo?.at(-1)?.file_id;
-   if(typeof photo!=='string'||!photo)throw new InputError('Отправьте обычное фото в Telegram или нажмите кнопку под вопросом.');
-   s.data.mirrorPhoto=photo;return this.next(uid,s);
-  }
   if(message.photo?.length)throw new InputError('Добавление фотографий отключено. Продолжите заполнение заявки текстом или кнопками.');
   if(step==='processing')throw new InputError('Выберите «Есть обработка» или «Без обработки» кнопками под вопросом.');
   if(step==='thickness'){
