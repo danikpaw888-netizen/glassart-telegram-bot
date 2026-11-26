@@ -35,7 +35,7 @@ export class GlassArtRegister extends DurableObject {
  async ensureAlarm(){if(await this.ctx.storage.getAlarm()===null)await this.ctx.storage.setAlarm(Date.now()+1000);}
  async state(){
   const e=this.engine,username=e.config('username'),claim=e.config('claim'),ready=e.config('ready');
-  return {version:'3.8.1',configured:!!e.config('token'),active:!!e.config('owner'),username:username||null,group:e.config('group'),
+  return {version:'3.8.2',configured:!!e.config('token'),active:!!e.config('owner'),username:username||null,group:e.config('group'),
    delivery:{queued:e.one('SELECT COUNT(*) AS n FROM outbox WHERE failed=0').n,failed:e.one('SELECT COUNT(*) AS n FROM outbox WHERE failed=1').n,refreshing:e.one('SELECT COUNT(*) AS n FROM group_jobs').n,legacy_stickers:e.one('SELECT COUNT(*) AS n FROM status_reactions').n},
    claim_url:ready&&claim?`https://t.me/${username}?start=claim_${claim}`:null};
  }
@@ -129,7 +129,7 @@ export default {
  async fetch(request,env){
   const url=new URL(request.url),path=url.pathname;
   try{
-   if(request.method==='GET'&&path==='/health')return json({service:'GlassArt Telegram Bot',status:'ok',version:'3.8.1'});
+   if(request.method==='GET'&&path==='/health')return json({service:'GlassArt Telegram Bot',status:'ok',version:'3.8.2'});
    if(request.method==='GET'&&(path==='/'||path==='/setup')){
     const nonce=crypto.randomUUID().replaceAll('-','');
     return new Response(setupPage(nonce),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Content-Security-Policy':`default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`}});

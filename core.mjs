@@ -192,6 +192,9 @@ export class Engine {
    WHERE r.order_id IS NULL OR (
     r.status NOT IN (2,3) AND o.status IN (2,3)
     AND NOT EXISTS (SELECT 1 FROM report_completions c WHERE c.order_id=o.id)
+    AND (SELECT e.at FROM events e
+     WHERE e.order_id=o.id AND e.action='Статус: Выполнено' ORDER BY e.id DESC LIMIT 1)
+     >= COALESCE((SELECT closed FROM day_reports WHERE legacy=0 ORDER BY id DESC LIMIT 1),'')
    ) ORDER BY o.id`);
  }
  nextReportDay(){

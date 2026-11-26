@@ -265,10 +265,29 @@ test('open periods cross midnight and persist across engine restart; snapshots d
  const f=fixture();f.fill();f.send('/day');const first=f.engine.one('SELECT * FROM day_reports WHERE legacy=0');
  f.fill();f.engine.q("UPDATE orders SET created='2026-01-01T00:00:00.000Z' WHERE id=2");
  const e=new Engine(f.engine.sql);assert.deepEqual(e.openReportOrders().map(o=>o.id),[2]);
- e.q('UPDATE orders SET status=3');assert.match(e.savedReport(first),/Выполнено: 0 заявок/);
+ e.q('UPDATE orders SET status=3');e.event(1,100,'Статус: Выполнено');assert.match(e.savedReport(first),/Выполнено: 0 заявок/);
  assert.match(f.transaction(()=>e.closeDayReport()),/Выполнено: 2 заявок · 8 м²/);
  assert.equal(e.q('SELECT * FROM report_orders').length,2);
  assert.equal(e.q('SELECT * FROM report_completions').length,1);
+});
+
+test('old completion events and later field edits add no area to a new period',t=>{
+ t.mock.timers.enable({apis:['Date'],now:new Date('2026-11-23T14:00:00Z')});
+ const f=fixture(),e=f.engine;
+ f.fill();f.fill();f.send('/day');
+ t.mock.timers.setTime(Date.parse('2026-11-24T14:00:00Z'));
+ e.q("UPDATE orders SET status=3 WHERE id=1");
+ e.event(1,100,'Статус: Выполнено');
+ // A period closed by an older version before carryover completions were tracked.
+ e.q('INSERT INTO day_reports(day,closed) VALUES (?,?)','2026-11-25','2026-11-25T14:00:00.000Z');
+ t.mock.timers.setTime(Date.parse('2026-11-26T14:00:00Z'));
+ e.q("UPDATE orders SET updated=? WHERE id=1",new Date().toISOString());
+ e.event(1,100,'Изменение полей');
+ e.q("UPDATE orders SET status=3 WHERE id=2");
+ e.event(2,100,'Статус: Выполнено');
+ assert.deepEqual(e.openReportOrders().map(o=>o.id),[2]);
+ f.send('/day');assert.match(f.messages().at(-1).text,/Выполнено: 1 заявок · 4 м²/);
+ assert.deepEqual(e.q('SELECT order_id FROM report_completions').map(o=>o.order_id),[2]);
 });
 
 test('a carried order contributes area once when completed on the fourth day',t=>{
