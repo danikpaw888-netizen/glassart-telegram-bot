@@ -16,6 +16,8 @@ export const SCHEMA = [
  'CREATE TABLE IF NOT EXISTS day_reports(id INTEGER PRIMARY KEY AUTOINCREMENT,day TEXT NOT NULL,closed TEXT NOT NULL,legacy INTEGER NOT NULL DEFAULT 0)',
  'CREATE TABLE IF NOT EXISTS report_orders(order_id INTEGER PRIMARY KEY,report_id INTEGER NOT NULL,data TEXT NOT NULL,status INTEGER NOT NULL)',
  'CREATE INDEX IF NOT EXISTS report_orders_report ON report_orders(report_id)',
+ 'CREATE TABLE IF NOT EXISTS report_completions(order_id INTEGER PRIMARY KEY,report_id INTEGER NOT NULL,data TEXT NOT NULL,status INTEGER NOT NULL)',
+ 'CREATE INDEX IF NOT EXISTS report_completions_report ON report_completions(report_id)',
  'CREATE TABLE IF NOT EXISTS deletion_requests(token TEXT PRIMARY KEY,order_id INTEGER NOT NULL,version INTEGER NOT NULL,actor INTEGER NOT NULL,chat_id INTEGER NOT NULL,expires INTEGER NOT NULL)',
  'CREATE TABLE IF NOT EXISTS deleted_orders(order_id INTEGER PRIMARY KEY,actor INTEGER NOT NULL,name TEXT NOT NULL,at TEXT NOT NULL)',
  'CREATE TABLE IF NOT EXISTS removal_outbox(outbox_id INTEGER PRIMARY KEY,order_id INTEGER NOT NULL,chat_id INTEGER NOT NULL,message_id INTEGER NOT NULL)',
@@ -154,7 +156,14 @@ export class Engine {
   }
   this.setConfig('report_periods_initialized',true);
  }
- openReportOrders(){return this.q('SELECT id,data,status FROM orders o WHERE NOT EXISTS (SELECT 1 FROM report_orders r WHERE r.order_id=o.id) ORDER BY id');}
+ openReportOrders(){
+  return this.q(`SELECT o.id,o.data,o.status,r.order_id IS NOT NULL AS carried
+   FROM orders o LEFT JOIN report_orders r ON r.order_id=o.id
+   WHERE r.order_id IS NULL OR (
+    r.status NOT IN (2,3) AND o.status IN (2,3)
+    AND NOT EXISTS (SELECT 1 FROM report_completions c WHERE c.order_id=o.id)
+   ) ORDER BY o.id`);
+ }
  nextReportDay(){
   const today=localDay(Date.now()),last=this.one('SELECT day FROM day_reports WHERE legacy=0 ORDER BY id DESC LIMIT 1');
   const next=last?new Date(Date.parse(last.day+'T00:00:00Z')+86400000).toISOString().slice(0,10):today;
@@ -165,8 +174,12 @@ export class Engine {
   return `📊 Итоги за ${day.split('-').reverse().join('.')}\n${label}\n\n📋 Заявок: ${rows.length}\n✅ Стёкол: ${lines(rows).reduce((n,x)=>n+x.count,0)}\n📐 Общая площадь: ${areaDisplay(lines(done))} м² (только выполненные)\n\n✅ Выполнено: ${done.length} заявок · ${areaDisplay(lines(done))} м²\n❌ Не выполнено: ${pending.length} заявок · ${areaDisplay(lines(pending))} м²`;
  }
  savedReport(report){
-  const rows=this.q('SELECT r.data,r.status FROM report_orders r JOIN orders o ON o.id=r.order_id WHERE r.report_id=? ORDER BY r.order_id',report.id);
-  return this.formatReport(report.day,rows,report.legacy?'Архив до перехода на отчётные периоды (по дате отправки)':`Отчёт №${report.id} · заявки после предыдущего отчёта`);
+  const rows=this.q(`SELECT r.data,r.status FROM (
+   SELECT order_id,data,status FROM report_orders WHERE report_id=?
+   UNION ALL
+   SELECT order_id,data,status FROM report_completions WHERE report_id=?
+  ) r JOIN orders o ON o.id=r.order_id ORDER BY r.order_id`,report.id,report.id);
+  return this.formatReport(report.day,rows,report.legacy?'Архив до перехода на отчётные периоды (по дате отправки)':`Отчёт №${report.id} · заявки за период`);
  }
  dayReport(argument=''){
   const day=argument?this.reportDate(argument):null;this.ensureReports();
@@ -176,10 +189,13 @@ export class Engine {
  closeDayReport(argument=''){
   if(argument)return this.dayReport(argument);
   this.ensureReports();const rows=this.openReportOrders(),last=this.one('SELECT * FROM day_reports WHERE legacy=0 ORDER BY id DESC LIMIT 1');
-  // Repeated commands without new orders reuse the saved report.
+  // Repeated commands without new orders or completed carryovers reuse the saved report.
   if(!rows.length&&last)return this.savedReport(last);
   const day=this.nextReportDay(),closed=now(),id=this.one('INSERT INTO day_reports(day,closed) VALUES (?,?) RETURNING id',day,closed).id;
-  for(const o of rows)this.q('INSERT INTO report_orders VALUES (?,?,?,?)',o.id,id,o.data,o.status);
+  for(const o of rows){
+   const table=o.carried?'report_completions':'report_orders';
+   this.q(`INSERT INTO ${table} VALUES (?,?,?,?)`,o.id,id,o.data,o.status);
+  }
   return this.savedReport({id,day,closed,legacy:0});
  }
  repostPending(){const g=this.config('group');if(!g)return 0;this.q("INSERT OR IGNORE INTO group_reposts SELECT id,?,? FROM orders o WHERE status=0 AND (SELECT action FROM events e WHERE e.order_id=o.id AND e.action LIKE 'Статус:%' ORDER BY id DESC LIMIT 1)='Статус: Не выполнено'",g.id,g.thread_id||null);return this.one('SELECT COUNT(*) AS n FROM group_reposts WHERE chat_id=?',g.id).n;}
@@ -206,7 +222,7 @@ export class Engine {
   this.rememberUser(from);this.q('INSERT INTO deleted_orders VALUES (?,?,?,?)',o.id,uid,displayName(from),now());
   const cards=this.q('SELECT chat_id,message_id FROM group_cards WHERE order_id=? UNION SELECT chat_id,message_id FROM group_copies WHERE order_id=? UNION SELECT chat_id,message_id FROM status_reactions WHERE order_id=?',o.id,o.id,o.id);
   this.q('UPDATE outbox SET failed=2 WHERE id IN (SELECT outbox_id FROM outbox_meta WHERE order_id=?) OR id IN (SELECT outbox_id FROM reaction_outbox WHERE order_id=?) OR id IN (SELECT outbox_id FROM repost_deliveries WHERE order_id=?)',o.id,o.id,o.id);
-  for(const table of ['group_jobs','group_reposts','group_cards','group_copies','status_reactions','reaction_jobs','deletion_requests','report_orders'])this.q(`DELETE FROM ${table} WHERE order_id=?`,o.id);
+  for(const table of ['group_jobs','group_reposts','group_cards','group_copies','status_reactions','reaction_jobs','deletion_requests','report_orders','report_completions'])this.q(`DELETE FROM ${table} WHERE order_id=?`,o.id);
   this.q('DELETE FROM orders WHERE id=?',o.id);this.q('DELETE FROM events WHERE order_id=?',o.id);
   for(const card of cards)if(card.chat_id===this.config('group')?.id)this.queueRemoval(o.id,card.chat_id,card.message_id);
   respond(`🗑 Заявка ${code(o.id)} удалена. Исключена из отчётов и повторных отправок.`);

@@ -223,8 +223,37 @@ test('open periods cross midnight and persist across engine restart; snapshots d
  f.fill();f.engine.q("UPDATE orders SET created='2026-01-01T00:00:00.000Z' WHERE id=2");
  const e=new Engine(f.engine.sql);assert.deepEqual(e.openReportOrders().map(o=>o.id),[2]);
  e.q('UPDATE orders SET status=3');assert.match(e.savedReport(first),/Выполнено: 0 заявок/);
- assert.match(f.transaction(()=>e.closeDayReport()),/Выполнено: 1 заявок/);
+ assert.match(f.transaction(()=>e.closeDayReport()),/Выполнено: 2 заявок · 8 м²/);
  assert.equal(e.q('SELECT * FROM report_orders').length,2);
+ assert.equal(e.q('SELECT * FROM report_completions').length,1);
+});
+
+test('a carried order contributes area once when completed on the fourth day',t=>{
+ t.mock.timers.enable({apis:['Date'],now:new Date('2026-11-23T14:00:00Z')});
+ const f=fixture(),e=f.engine;
+ e.bindGroup({id:-1001,title:'Цех'});f.fill();
+ const card=f.deliver().find(x=>x.rich_message);
+ const group={group:true,uid:500,messageId:card.message_id,access:{groupMember:true}};
+ f.send(null,{...group,callback:'g:1:1:0'});f.deliver();
+ f.send('/day',group);
+ assert.match(f.messages().at(-1).text,/Общая площадь: 0 м²/);
+ f.deliver();
+ for(const day of [24,25]){
+  t.mock.timers.setTime(Date.parse(`2026-11-${day}T14:00:00Z`));
+  f.send('/day',group);f.deliver();
+ }
+ assert.equal(e.q('SELECT * FROM report_completions').length,0);
+ t.mock.timers.setTime(Date.parse('2026-11-26T14:00:00Z'));
+ f.send(null,{...group,callback:'g:1:2:3'});f.deliver();
+ f.send('/day',group);
+ const report=f.messages().at(-1).text;
+ assert.match(report,/Итоги за 26.11.2026/);
+ assert.match(report,/Выполнено: 1 заявок · 4 м²/);
+ f.send('/day',group);
+ assert.equal(f.messages().at(-1).text,report);
+ assert.equal(e.q('SELECT * FROM report_completions').length,1);
+ assert.match(e.dayReport('23.11.2026'),/Не выполнено: 1 заявок · 4 м²/);
+ assert.deepEqual(new Engine(e.sql).openReportOrders(),[]);
 });
 
 test('invalid dates and archive reads never close the open period; failed transactions roll back closure',()=>{
