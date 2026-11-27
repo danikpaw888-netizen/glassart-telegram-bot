@@ -4,6 +4,7 @@ export const STATUSES = ['Новая', 'В работе', 'Готова', 'За�
 export const FIELDS = {customer:'Клиент',film:'Тип / марка пленки',lines:'Размеры стекол',processing:'Обработка всего заказа',thickness:'Толщина всего заказа',comment:'Комментарий'};
 export const completionText = status => [2,3].includes(status)?'Выполнено':'Не выполнено';
 const STEPS = Object.keys(FIELDS);
+const ORDER_TYPES = [[['Стекло с плёнкой','new_glass']],[['Зеркало','new_mirror']]];
 const PROMPTS = {
   customer:'Кто заказал тонировку? Имя клиента или название компании (до 150 символов).',
   film:'Введите тип и марку пленки, при наличии артикул (до 150 символов).',
@@ -11,6 +12,12 @@ const PROMPTS = {
   processing:'Есть ли обработка у стекол этого заказа? Выберите «Есть обработка» или «Без обработки».',
   thickness:'Введите общую толщину стекол заказа в мм. Например: 4, 6 или 10,5.',
   comment:'Комментарий (до 500 символов) или «Пропустить».'
+};
+const MIRROR_PROMPTS = {
+ customer:'Кто заказал зеркало? Имя клиента или название компании (до 150 символов).',
+ lines:'Введите размеры зеркал в мм: ширина × высота × количество. Например: 1200 × 800 × 2. Для фигурного зеркала укажите максимальную ширину и высоту.',
+ processing:'Нужна ли обработка края зеркала?',
+ thickness:'Введите толщину зеркала в мм. Например: 4 или 6.'
 };
 export const SCHEMA = [
  'CREATE TABLE IF NOT EXISTS day_reports(id INTEGER PRIMARY KEY AUTOINCREMENT,day TEXT NOT NULL,closed TEXT NOT NULL,legacy INTEGER NOT NULL DEFAULT 0)',
@@ -80,12 +87,6 @@ export class Engine {
  session(uid){
   const row=this.one('SELECT data FROM sessions WHERE id=?',uid);if(!row)return null;
   const s=JSON.parse(row.data);
-  if(s.mode==='draft'&&s.step==='mirror_photo'){
-   s.step='preview';
-   delete s.returnPreview;
-   delete s.data.mirrorPhoto;
-   this.put(uid,s);
-  }
   if(s.mode==='draft'&&s.schemaVersion!==4){
    if(['phone','object'].includes(s.step))s.step='film';
    if(s.step==='deadline')s.step='comment';
@@ -108,7 +109,7 @@ export class Engine {
   for(const line of text.split('\n')){if(part.length+line.length>3400){chunks.push(part);part='';}part+=line+'\n';}chunks.push(part);
   chunks.forEach((text,index)=>{const params={chat_id:uid,text:text.trim()||'—'};if(rows&&index===chunks.length-1)params.reply_markup={inline_keyboard:rows.map(row=>row.map(([text,callback_data])=>({text,callback_data})))};this.enqueue('sendMessage',params);});
  }
- menu(uid){const rows=[[['＋ Новая заявка','new']],[['🪞 Заявка на зеркало','new_mirror']],[['📝 Продолжить черновик','resume']]];if(this.isAdmin(uid))rows.push([['👥 Администраторы','manage_admins']],[['🗑 Удалить заявку','delete_help']],[['Группа сотрудников','group_help']]);this.send(uid,'GlassArt · Отправка заявок\nЗаполните заявку здесь. Все заявки и кнопки выполнения находятся в группе сотрудников.\nЧерновик сохраняется автоматически. /cancel — отменить ввод.\n/day — завершить период и сохранить отчёт; /day ДД.ММ.ГГГГ — посмотреть закрытый отчёт. Новые заявки попадут в следующий отчёт; заявки со статусом «Не выполнено» повторяются в группе сотрудников.',rows);}
+ menu(uid){const rows=[[['＋ Новая заявка','new']],[['📝 Продолжить черновик','resume']]];if(this.isAdmin(uid))rows.push([['👥 Администраторы','manage_admins']],[['🗑 Удалить заявку','delete_help']],[['Группа сотрудников','group_help']]);this.send(uid,'GlassArt · Отправка заявок\nЗаполните заявку здесь. Все заявки и кнопки выполнения находятся в группе сотрудников.\nЧерновик сохраняется автоматически. /cancel — отменить ввод.\n/day — завершить период и сохранить отчёт; /day ДД.ММ.ГГГГ — посмотреть закрытый отчёт. Новые заявки попадут в следующий отчёт; заявки со статусом «Не выполнено» повторяются в группе сотрудников.',rows);}
  groupHelp(uid){if(!this.isAdmin(uid))return;const g=this.config('group');this.send(uid,(g?`Группа: ${g.title}\n`:'Группа сотрудников пока не подключена.\n')+'Добавьте @'+(this.config('username')||'GlassArtWork_bot')+' в нужную группу и назначьте администратором. Затем от своего аккаунта отправьте в группе /bindgroup. Вы должны быть администратором этого бота и участником группы. Сохраненные заявки тоже поступят туда.');}
  adminPanel(uid){if(!this.isAdmin(uid))return this.send(uid,'Управление администраторами доступно только администраторам.');this.send(uid,`Администраторы GlassArt:\n${this.adminIds().map(id=>'• ID '+id).join('\n')}\n\nДля назначения нужен числовой Telegram ID. Будущий администратор может получить его командой /id у этого бота.`,[[['＋ Добавить администратора','admin_add']],[['Снять права администратора','admin_remove']],[['Главное меню','menu']]]);}
  drows(s,rows){return rows.map(row=>row.map(([label,action])=>[label,`d:${s.token}:${s.rev}:${action}`]));}
@@ -133,13 +134,21 @@ export class Engine {
   const step=s.step;
   const mirror=s.data.kind==='mirror';
   if(step==='preview')return this.send(uid,this.card(s.data,'📋 Ваш расчёт:'),this.drows(s,[[['✅ Отправить заявку','save']],[['✏️ Исправить','edit']],[['Отменить ввод','cancel']]]));
-  if(step==='edit_menu')return this.send(uid,'Какое поле исправить? При замене размеров прежний список заменяется.',this.drows(s,[...Object.entries(FIELDS).filter(([k])=>!mirror||k!=='film').map(([k,label])=>[[label,'field_'+k]]),[['Вернуться к проверке','preview']]]));
+  if(step==='edit_menu'){
+   const fields=Object.entries(FIELDS).filter(([key])=>!mirror||key!=='film').map(([key,label])=>[[label,'field_'+key]]);
+   if(mirror)fields.push([['Фото зеркала','field_mirror_photo']]);
+   return this.send(uid,'Какое поле исправить? При замене размеров прежний список заменяется.',this.drows(s,[...fields,[['Вернуться к проверке','preview']]]));
+  }
+  if(step==='mirror_photo'){
+   const photoButtons=s.data.mirrorPhoto?[['Оставить фото','mirror_photo_done'],['Удалить фото','mirror_photo_remove']]:[['Пропустить','mirror_photo_done']];
+   return this.send(uid,'Можно отправить одно фото или эскиз, чтобы показать форму зеркала.',this.drows(s,[photoButtons,[['Отменить ввод','cancel']]]));
+  }
   const rows=[];
   if(step==='comment')rows.push([['Пропустить','skip']]);
   if(step==='processing')rows.push([['Есть обработка','processing_yes'],['Без обработки','processing_no']]);
   if(step==='lines'){rows.push([['Готово','done']]);if(s.data.lines.length)rows.push([['Убрать последнее','remove']]);}
   rows.push([['Отменить ввод','cancel']]);
-  const prompt=mirror&&step==='lines'?'Введите ширину, высоту и количество зеркал в мм. Например: 1200 × 800 × 2. Для фигурного зеркала укажите максимальную ширину и высоту.':PROMPTS[step];
+  const prompt=mirror?(MIRROR_PROMPTS[step]||PROMPTS[step]):PROMPTS[step];
   this.send(uid,(step==='thickness'?`📏 Общий периметр ${mirror?'зеркал по габаритам':'стёкол'}: ${perimeterDisplay(s.data.lines)} м (с учётом количества).\n\n`:'')+prompt,this.drows(s,rows));
  }
  start(uid,author,order,kind){
@@ -151,6 +160,8 @@ export class Engine {
  next(uid,s){
   if(s.returnPreview){s.step='preview';delete s.returnPreview;}
   else if(s.data.kind==='mirror'&&s.step==='customer')s.step='lines';
+  else if(s.data.kind==='mirror'&&s.step==='comment')s.step='mirror_photo';
+  else if(s.step==='mirror_photo')s.step='preview';
   else s.step=STEPS[STEPS.indexOf(s.step)+1]||'preview';
   this.put(uid,s);this.prompt(uid,s);
  }
@@ -368,16 +379,12 @@ export class Engine {
   if(!d.customer||!d.lines.length||(!mirror&&!d.film))throw new InputError(mirror?'Заполните клиента и хотя бы один размер зеркала.':'Заполните клиента, пленку и хотя бы один размер.');
   if(!s.editId&&(typeof d.processing!=='boolean'||!d.thickness)){s.returnPreview=true;return this.completeLines(uid,s);}
   const clean={customer:d.customer,film:d.film,lines:d.lines,processing:d.processing,thickness:d.thickness,comment:d.comment||''};
-  if(mirror){
-   clean.kind=d.kind;
-   const savedPhoto=s.editId&&this.get(s.editId)?.data.mirrorPhoto;
-   if(savedPhoto)clean.mirrorPhoto=savedPhoto;
-  }
+  if(mirror){clean.kind=d.kind;if(d.mirrorPhoto)clean.mirrorPhoto=d.mirrorPhoto;}
   if(Array.isArray(d.photos)&&d.photos.length)clean.photos=d.photos;
   const data=JSON.stringify(clean),search=['customer','film','comment'].map(k=>d[k]||'').join(' ').toLowerCase();let oid=s.editId;
   if(oid){const changed=this.q('UPDATE orders SET data=?,search_text=?,updated=?,version=version+1 WHERE id=? AND version=? RETURNING id',data,search,now(),oid,s.version);if(!changed.length)return this.send(uid,'Заявка уже изменилась в группе. Черновик сохранен. При необходимости отмените его и отправьте новую заявку.');this.event(oid,uid,'Изменение полей');}
   else {oid=this.one('INSERT INTO orders(token,data,search_text,created,updated,creator,author) VALUES (?,?,?,?,?,?,?) RETURNING id',s.token,data,search,now(),now(),uid,s.author).id;this.event(oid,uid,'Создание');}
-  this.clear(uid);this.send(uid,`✅ Заявка ${code(oid)} сохранена. ${this.config('group')?'Поставлена в очередь отправки в группу сотрудников.':'Будет отправлена после подключения группы сотрудников.'}`,[[['＋ Следующая заявка','new']],[['🪞 Заявка на зеркало','new_mirror']]]);this.notify(oid);
+  this.clear(uid);this.send(uid,`✅ Заявка ${code(oid)} сохранена. ${this.config('group')?'Поставлена в очередь отправки в группу сотрудников.':'Будет отправлена после подключения группы сотрудников.'}\n\nЧто оформить дальше?`,ORDER_TYPES);this.notify(oid);
  }
  draftAction(uid,value){
   const [,token,rev,action]=value.split(':'),s=this.session(uid);
@@ -388,6 +395,11 @@ export class Engine {
   if(['edit','preview'].includes(action)&&['preview','edit_menu'].includes(step)){s.step=action==='edit'?'edit_menu':'preview';this.put(uid,s);return this.prompt(uid,s);}
   if(action==='field_photos')return this.prompt(uid,s);
   const mirror=s.data.kind==='mirror';
+  if(action==='field_mirror_photo'&&step==='edit_menu'&&mirror){s.step='mirror_photo';s.returnPreview=true;this.put(uid,s);return this.prompt(uid,s);}
+  if(step==='mirror_photo'&&mirror&&['mirror_photo_done','mirror_photo_remove'].includes(action)){
+   if(action==='mirror_photo_remove')delete s.data.mirrorPhoto;
+   return this.next(uid,s);
+  }
   if(action.startsWith('field_')&&step==='edit_menu'&&Object.hasOwn(FIELDS,action.slice(6))&&!(mirror&&action==='field_film')){s.step=action.slice(6);s.returnPreview=true;if(s.step==='lines')s.data.lines=[];this.put(uid,s);return this.prompt(uid,s);}
   if(action==='skip'&&step==='comment'){s.data[step]='';return this.next(uid,s);}
   if(['processing_yes','processing_no'].includes(action)&&step==='processing'){s.data.processing=action==='processing_yes';return this.completeLines(uid,s);}
@@ -407,14 +419,20 @@ export class Engine {
    this.put(uid,{mode:value});return this.send(uid,value==='admin_add'?'Отправьте числовой Telegram ID нового администратора. Его можно узнать командой /id у этого бота. /cancel — отмена.':'Отправьте числовой Telegram ID администратора, с которого нужно снять права. Он останется сотрудником. /cancel — отмена.');
   }
   if(value==='resume'){const s=this.session(uid);return s?.mode==='draft'?this.prompt(uid,s):this.send(uid,'Черновика нет. Создайте новую заявку.');}
-  if(value==='new'||value==='new_mirror'){
+  if(['new','new_glass','new_mirror'].includes(value)){
    if(this.session(uid)?.mode==='draft')return this.send(uid,'Сначала отправьте или отмените текущий черновик. /resume — продолжить.');
+   if(value==='new')return this.send(uid,'Что оформляем?',ORDER_TYPES);
    return this.start(uid,author,undefined,value==='new_mirror'?'mirror':undefined);
   }
  }
  input(uid,s,message){
   const text=(message.text||'').trim(),step=s.step;
-  if(message.photo?.length)throw new InputError('Добавление фотографий отключено. Продолжите заполнение заявки текстом или кнопками.');
+  if(step==='mirror_photo'&&s.data.kind==='mirror'){
+   const photo=message.photo?.at(-1)?.file_id;
+   if(typeof photo!=='string'||!photo)throw new InputError('Отправьте изображение как фото или нажмите кнопку под вопросом.');
+   s.data.mirrorPhoto=photo;return this.next(uid,s);
+  }
+  if(message.photo?.length)throw new InputError(s.data.kind==='mirror'?'Фото можно приложить после комментария или через «Исправить» в карточке перед отправкой.':'Для этой заявки фото не требуется. Продолжите заполнение текстом или кнопками.');
   if(step==='processing')throw new InputError('Выберите «Есть обработка» или «Без обработки» кнопками под вопросом.');
   if(step==='thickness'){
    s.data.thickness=parseThickness(text);return this.completeLines(uid,s);

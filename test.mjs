@@ -10,12 +10,13 @@ function fixture(){
  const transaction=fn=>{db.exec('BEGIN');try{const result=fn();db.exec('COMMIT');return result;}catch(e){db.exec('ROLLBACK');throw e;}};
  function send(text,options={}){const uid=options.uid||100,from={id:uid,first_name:'Анна'},message={message_id:options.messageId||seq+1,chat:{id:options.group?(options.chatId||-1001):uid,type:options.group?'supergroup':'private',title:'GlassArt'},from};if(text!==null)message.text=text;if(options.photo)message.photo=[{file_id:options.photo}];const update={update_id:++seq,...(options.callback?{callback_query:{id:String(seq),from,message,data:options.callback}}:{message})};transaction(()=>engine.handle(update,options.access||{}));return update;}
  function action(name,uid=100){const s=engine.session(uid),value=`d:${s.token}:${s.rev}:${name}`;send(null,{uid,callback:value});return value;}
- function fill(save=true,uid=100){send('/new',{uid});send('ТОО Стекло',{uid});send('Солнцезащитная Silver 20',{uid});send('1200 × 1500 × 2\n500 800',{uid});action('done',uid);action('processing_yes',uid);send('4',{uid});send('Позвонить перед приездом',{uid});if(save)return action('save',uid);}
+ function startGlass(uid=100){send('/new',{uid});send(null,{uid,callback:'new_glass'});}
+ function fill(save=true,uid=100){startGlass(uid);send('ТОО Стекло',{uid});send('Солнцезащитная Silver 20',{uid});send('1200 × 1500 × 2\n500 800',{uid});action('done',uid);action('processing_yes',uid);send('4',{uid});send('Позвонить перед приездом',{uid});if(save)return action('save',uid);}
  const plain=p=>p.text??p.rich_message?.html.replaceAll('<br>','\n').replaceAll('</p>','\n\n').replace(/<[^>]*>/g,'').replaceAll('&lt;','<').replaceAll('&gt;','>').replaceAll('&amp;','&');
  const messages=()=>engine.q("SELECT params FROM outbox WHERE method IN ('sendMessage','sendRichMessage') ORDER BY id").map(x=>{const p=JSON.parse(x.params);return {...p,text:plain(p)};});
  let messageId=1000;
  function deliver(){const sent=[];for(let turn=0;turn<20;turn++){transaction(()=>engine.prepareGroupJobs());const rows=engine.q('SELECT * FROM outbox WHERE failed=0 ORDER BY id');if(!rows.length)break;for(const row of rows){const params=JSON.parse(row.params);const id=params.message_id||++messageId;sent.push({method:row.method,...params,text:plain(params),message_id:id});transaction(()=>engine.delivered(row.id,{message_id:id}));}}return sent;}
- return {db,engine,send,action,fill,messages,transaction,deliver};
+ return {db,engine,send,action,fill,startGlass,messages,transaction,deliver};
 }
 test('dimensions and exact area',()=>{
  for(const text of ['1200 × 1500 × 2','1200x1500x2','1200х1500х2','1200 1500 2'])assert.equal(areaText([parseLine(text)]),'3,600');
@@ -57,40 +58,49 @@ test('binding queues every existing order and batches its publication',()=>{
 });
 
 test('optional comment and required glass metadata',()=>{
- const f=fixture();f.send('/new');f.send('Клиент');assert.equal(f.engine.session(100).step,'film');f.send('Пленка');f.action('done');assert.equal(f.engine.session(100).step,'lines');f.send('1000 1000');assert.equal(f.engine.session(100).step,'lines');f.action('done');assert.equal(f.engine.session(100).step,'processing');f.send('нет');assert.equal(f.engine.session(100).step,'processing');f.action('processing_no');f.send('0');assert.equal(f.engine.session(100).step,'thickness');f.send('4');assert.equal(f.engine.session(100).step,'comment');f.action('skip');f.action('save');const d=f.engine.get(1).data;assert.equal('photos' in d,false);assert.equal(d.lines[0].processing,false);assert.equal(d.lines[0].thickness,'4');assert.equal('phone' in d,false);assert.equal('object' in d,false);assert.equal('deadline' in d,false);
+ const f=fixture();f.startGlass();f.send('Клиент');assert.equal(f.engine.session(100).step,'film');f.send('Пленка');f.action('done');assert.equal(f.engine.session(100).step,'lines');f.send('1000 1000');assert.equal(f.engine.session(100).step,'lines');f.action('done');assert.equal(f.engine.session(100).step,'processing');f.send('нет');assert.equal(f.engine.session(100).step,'processing');f.action('processing_no');f.send('0');assert.equal(f.engine.session(100).step,'thickness');f.send('4');assert.equal(f.engine.session(100).step,'comment');f.action('skip');f.action('save');const d=f.engine.get(1).data;assert.equal('photos' in d,false);assert.equal(d.lines[0].processing,false);assert.equal(d.lines[0].thickness,'4');assert.equal('phone' in d,false);assert.equal('object' in d,false);assert.equal('deadline' in d,false);
 });
 test('photos are rejected and removed from cards and edit controls',()=>{
  const f=fixture();f.fill(false);assert.equal(f.engine.session(100).step,'preview');f.send(null,{photo:'rejected-file-id'});assert.equal(f.engine.session(100).step,'preview');assert.equal('photos' in f.engine.session(100).data,false);f.action('edit');assert.ok(!f.messages().at(-1).reply_markup.inline_keyboard.flat().some(x=>x.callback_data.includes('photos')));f.action('preview');f.action('save');f.send(null,{callback:'photos:1'});assert.equal(f.engine.q("SELECT id FROM outbox WHERE method='sendPhoto'").length,0);
  for(const m of f.messages()){assert.ok(m.text.length<=4096);for(const b of m.reply_markup?.inline_keyboard.flat()||[])assert.ok(new TextEncoder().encode(b.callback_data).length<=64);}
 });
 
-test('mirror orders skip photos and completed area is split by product',()=>{
+test('both order types are offered before and after submission, and mirror photos stay on the card',()=>{
  const f=fixture(),e=f.engine;
  e.bindGroup({id:-1001,title:'Цех'});
  f.fill();
- f.send('/new');f.send('Клиент');f.send('Плёнка');f.send('2000 × 1000');
+ const types=['new_glass','new_mirror'];
+ const buttons=message=>message.reply_markup.inline_keyboard.flat().map(b=>b.callback_data);
+ assert.deepEqual(buttons(f.messages().at(-1)),types);
+ f.send(null,{callback:'new_glass'});f.send('Клиент');f.send('Плёнка');f.send('2000 × 1000');
  f.action('done');f.action('processing_no');f.send('6');f.action('skip');f.action('save');
  f.send('/menu');const menu=f.messages().findLast(x=>x.text.startsWith('GlassArt · Отправка заявок'));
- assert.ok(menu.reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='new_mirror'));
+ assert.ok(buttons(menu).includes('new'));
+ f.send(null,{callback:'new'});assert.deepEqual(buttons(f.messages().at(-1)),types);
+ assert.equal(e.session(100),null);
+ f.send('/new');assert.deepEqual(buttons(f.messages().at(-1)),types);
  f.send(null,{callback:'new_mirror'});f.send('Клиент зеркала');
  assert.equal(e.session(100).step,'lines');
+ f.send(null,{callback:'new_glass'});assert.equal(e.session(100).data.kind,'mirror');
  f.send('1500 × 1000');f.action('done');f.action('processing_yes');f.send('6');f.send('Скруглить углы');
- assert.equal(e.session(100).step,'preview');
- f.send(null,{photo:'sketch'});assert.match(f.messages().at(-1).text,/Добавление фотографий отключено/);
- f.action('edit');assert.ok(!f.messages().at(-1).reply_markup.inline_keyboard.flat().some(x=>x.callback_data.includes('photo')));
- f.action('preview');f.action('save');
+ assert.equal(e.session(100).step,'mirror_photo');
+ f.action('mirror_photo_done');assert.equal(e.session(100).step,'preview');
+ assert.equal(e.session(100).data.mirrorPhoto,undefined);
+ f.action('edit');f.action('field_mirror_photo');f.send(null,{photo:'sketch'});
+ assert.match(f.messages().at(-1).text,/Фото приложено/);
+ f.action('save');
  assert.equal(e.get(3).data.kind,'mirror');
- assert.equal(e.get(3).data.mirrorPhoto,undefined);
+ assert.equal(e.get(3).data.mirrorPhoto,'sketch');
  assert.equal(e.get(3).data.film,undefined);
  const cards=f.deliver().filter(x=>x.chat_id===-1001&&x.rich_message);
  const mirror=cards.find(x=>x.text.includes('GA-000003'));
  assert.match(mirror.text,/Площадь по габаритам: 1.5 м²/);
  assert.doesNotMatch(mirror.text,/Плёнка/);
- assert.equal(mirror.rich_message.media,undefined);
+ assert.deepEqual(mirror.rich_message.media,[{id:'mirror',media:{type:'photo',media:'sketch'}}]);
  const group={group:true,uid:500,access:{groupMember:true}};
  for(const [i,card] of cards.entries())f.send(null,{...group,messageId:card.message_id,callback:`g:${i+1}:1:${i===2?0:3}`});
  const edited=f.deliver().find(x=>x.method==='editMessageText'&&x.message_id===mirror.message_id&&x.rich_message);
- assert.deepEqual(edited.rich_message.media.map(m=>m.id),['status']);
+ assert.deepEqual(edited.rich_message.media.map(m=>m.id),['status','mirror']);
  f.send('/day',group);
  const first=f.messages().at(-1).text;
  assert.match(first,/Общая площадь: 6 м²/);
@@ -98,7 +108,7 @@ test('mirror orders skip photos and completed area is split by product',()=>{
  assert.match(first,/Тонировка 6 мм — 2 м² · периметр 6 м/);
  assert.match(first,/Зеркала — 0 м² · периметр по габаритам 0 м/);
  const repost=f.deliver().find(x=>x.method==='sendRichMessage'&&x.text?.includes('GA-000003'));
- assert.deepEqual(repost.rich_message.media.map(m=>m.id),['status']);
+ assert.deepEqual(repost.rich_message.media.map(m=>m.id),['status','mirror']);
  f.send(null,{...group,messageId:repost.message_id,callback:'g:3:2:3'});f.deliver();
  f.send('/day',group);
  const second=f.messages().at(-1).text;
@@ -145,7 +155,7 @@ test('last admin cannot be removed and demotion retains only employee access',()
  const restarted=new Engine(f.engine.sql);assert.deepEqual(restarted.adminIds(),[200]);assert.equal(restarted.allowed(100),false);
 });
 test('admin panel adds and removes by ID, rejects invalid input and preserves drafts',()=>{
- const f=fixture();f.send('/menu');assert.ok(f.messages().at(-2).reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='manage_admins'));f.send(null,{callback:'admin_add'});f.send('не число');assert.equal(f.engine.session(100).mode,'admin_add');f.send('200');assert.equal(f.engine.isAdmin(200),true);assert.equal(f.engine.session(100),null);f.send(null,{callback:'admin_remove'});f.send('200');assert.equal(f.engine.isAdmin(200),false);assert.equal(f.engine.allowed(200),true);f.send('/new');const token=f.engine.session(100).token;f.send(null,{callback:'admin_add'});assert.equal(f.engine.session(100).token,token);assert.equal(f.engine.session(100).mode,'draft');
+ const f=fixture();f.send('/menu');assert.ok(f.messages().at(-2).reply_markup.inline_keyboard.flat().some(x=>x.callback_data==='manage_admins'));f.send(null,{callback:'admin_add'});f.send('не число');assert.equal(f.engine.session(100).mode,'admin_add');f.send('200');assert.equal(f.engine.isAdmin(200),true);assert.equal(f.engine.session(100),null);f.send(null,{callback:'admin_remove'});f.send('200');assert.equal(f.engine.isAdmin(200),false);assert.equal(f.engine.allowed(200),true);f.startGlass();const token=f.engine.session(100).token;f.send(null,{callback:'admin_add'});assert.equal(f.engine.session(100).token,token);assert.equal(f.engine.session(100).mode,'draft');
 });
 test('legacy owner migrates once and admins do not receive private order broadcasts',()=>{
  const f=fixture();const migrated=new Engine(f.engine.sql);assert.deepEqual(migrated.adminIds(),[100]);assert.equal(migrated.config('admins_initialized'),true);f.send('/addadmin 200');f.fill();assert.ok(!f.messages().some(m=>m.chat_id===200&&m.text.includes('📋 Заявка GA-')));
@@ -183,11 +193,11 @@ test('daily total counts only completed area within Kazakhstan midnight boundari
  f.engine.bindGroup({id:-1001,title:'Цех'});f.send('/day 26.10.2026',{group:true,uid:500,access:{groupMember:true}});assert.match(f.messages().at(-1).text,/Общая площадь: 4 м²/);
 });
 test('multiline positions use one common treatment and thickness for the whole order',()=>{
- const f=fixture();f.send('/new');f.send('Клиент');f.send('Пленка');f.send('1200 768 4\n12345 567 2');assert.equal(f.engine.session(100).data.lines.length,2);assert.equal(f.engine.session(100).step,'lines');f.action('done');f.action('processing_yes');f.send('4');assert.equal(f.engine.session(100).step,'comment');f.action('skip');f.action('save');const d=f.engine.get(1).data;assert.equal(d.processing,true);assert.equal(d.thickness,'4');assert.ok(d.lines.every(x=>x.processing===true&&x.thickness==='4'));
+ const f=fixture();f.startGlass();f.send('Клиент');f.send('Пленка');f.send('1200 768 4\n12345 567 2');assert.equal(f.engine.session(100).data.lines.length,2);assert.equal(f.engine.session(100).step,'lines');f.action('done');f.action('processing_yes');f.send('4');assert.equal(f.engine.session(100).step,'comment');f.action('skip');f.action('save');const d=f.engine.get(1).data;assert.equal(d.processing,true);assert.equal(d.thickness,'4');assert.ok(d.lines.every(x=>x.processing===true&&x.thickness==='4'));
 });
 
 test('invalid multiline batches do not partially append and enforce combined capacity',()=>{
- const f=fixture();f.send('/new');f.send('Клиент');f.send('Пленка');f.send('1000 500 2\nневерный размер');assert.equal(f.engine.session(100).data.lines.length,0);assert.match(f.messages().at(-1).text,/Строка 2/);f.send(Array(21).fill('1000 500').join('\n'));assert.equal(f.engine.session(100).data.lines.length,0);f.send('1000x500\r\n\r\n 1200 × 768 × 4 ');assert.equal(f.engine.session(100).data.lines.length,2);assert.equal(f.engine.session(100).data.lines[0].count,1);
+ const f=fixture();f.startGlass();f.send('Клиент');f.send('Пленка');f.send('1000 500 2\nневерный размер');assert.equal(f.engine.session(100).data.lines.length,0);assert.match(f.messages().at(-1).text,/Строка 2/);f.send(Array(21).fill('1000 500').join('\n'));assert.equal(f.engine.session(100).data.lines.length,0);f.send('1000x500\r\n\r\n 1200 × 768 × 4 ');assert.equal(f.engine.session(100).data.lines.length,2);assert.equal(f.engine.session(100).data.lines[0].count,1);
 });
 test('minimum area is applied to each individual pane before quantity',()=>{
  assert.equal(areaDisplay([parseLine('200 500 4')]),'1.2');assert.equal(areaDisplay([parseLine('600 500 2')]),'0.6');assert.equal(areaDisplay([parseLine('601 500 2')]),'0.601');assert.equal(areaDisplay([parseLine('200 500 4'),parseLine('1000 1000 2')]),'3.2');
@@ -225,7 +235,7 @@ test('perimeters use real dimensions exactly, include quantity and ignore minimu
  assert.equal(perimeterDisplay([parseLine('1200 1500 2'),parseLine('500 800')]),'13.4');assert.equal(perimeterDisplay([parseLine('200 500 4')]),'5.6');assert.equal(perimeterDisplay([parseLine('0.01 0.02 3')]),'0.00018');assert.equal(perimeterDisplay([parseLine('20000 20000 10000')]),'800000');assert.equal(perimeterDisplay([]),'0');
 });
 test('only the total perimeter appears after treatment and in the group card',()=>{
- for(const choice of ['processing_yes','processing_no']){const f=fixture();f.engine.bindGroup({id:-1001,title:'Цех'});f.send('/new');f.send('Клиент');f.send('Плёнка');f.send('1200 1500 2\n500 800');f.action('done');f.action(choice);assert.equal(f.engine.session(100).step,'thickness');assert.match(f.messages().at(-1).text,/Общий периметр стёкол: 13.4 м/);f.send('4');f.action('skip');const preview=f.messages().at(-1).text;assert.match(preview,/Обработка края: [^\n]+\n📏 Общий периметр: 13.4 м/);assert.doesNotMatch(preview,/Периметр 1 стекла|за 2 шт:/);assert.equal((preview.match(/периметр/gi)||[]).length,1);f.action('save');const card=f.deliver().find(x=>x.rich_message);assert.match(card.text,/Общий периметр: 13.4 м/);assert.doesNotMatch(card.text,/Периметр 1 стекла|за 2 шт:/);}
+ for(const choice of ['processing_yes','processing_no']){const f=fixture();f.engine.bindGroup({id:-1001,title:'Цех'});f.startGlass();f.send('Клиент');f.send('Плёнка');f.send('1200 1500 2\n500 800');f.action('done');f.action(choice);assert.equal(f.engine.session(100).step,'thickness');assert.match(f.messages().at(-1).text,/Общий периметр стёкол: 13.4 м/);f.send('4');f.action('skip');const preview=f.messages().at(-1).text;assert.match(preview,/Обработка края: [^\n]+\n📏 Общий периметр: 13.4 м/);assert.doesNotMatch(preview,/Периметр 1 стекла|за 2 шт:/);assert.equal((preview.match(/периметр/gi)||[]).length,1);f.action('save');const card=f.deliver().find(x=>x.rich_message);assert.match(card.text,/Общий периметр: 13.4 м/);assert.doesNotMatch(card.text,/Периметр 1 стекла|за 2 шт:/);}
 });
 
 test('private day mirrors report to group and pending cards are queued only after report delivery',()=>{
